@@ -127,20 +127,54 @@ does not depend on or import that package.
 Follow the integration-version rules in `AGENTS.md`. Run focused asset tests
 while developing and `just check` before integrating changes into fork `master`.
 
-## Building and installing the forked integration
+## Runtime deployment model
 
-The installed Pi extension comes from the Herdr binary that performs the
-installation. Build or run the fork, then invoke that fork's binary explicitly:
+A checked-out or pushed fork is not automatically used by the running Herdr
+session. Keep these three artifacts distinct:
+
+1. the Herdr server and ordinary CLI binary currently on `PATH`;
+2. the fork binary used as the integration installer;
+3. the managed Pi extension written to
+   `~/.pi/agent/extensions/herdr-agent-state.ts`.
+
+The running Herdr server may remain the normal upstream release because this
+patch does not change the socket protocol. Only the installer must come from the
+fork so it writes the version 9 Pi asset containing the `herdr:busy` listener.
+Build the fork and invoke that binary explicitly:
 
 ```bash
 cargo build
 ./target/debug/herdr integration install pi
-herdr integration status
+./target/debug/herdr integration status
 ```
 
-Using an upstream Herdr binary to reinstall the Pi integration replaces the
-forked asset with upstream's version. After Herdr updates, confirm which binary
-is active and reinstall from the maintained fork when necessary.
+Confirm the deployed asset rather than assuming that a fork checkout or build is
+active:
+
+```bash
+rg 'HERDR_INTEGRATION_VERSION=9|herdr:busy' \
+  ~/.pi/agent/extensions/herdr-agent-state.ts
+```
+
+An upstream Herdr binary embeds its own Pi asset. Running
+`herdr integration install pi` through that binary can replace the forked version
+with the upstream version, even while the server itself remains compatible.
+After Herdr updates or integration reinstalls, inspect the managed extension and
+reinstall it explicitly from the maintained fork when necessary.
+
+### Coordinated Pi cutover
+
+The managed Herdr extension and any package-owned lifecycle authority must not
+be active in the same Pi process. Installing the file does not alter an already
+running Pi extension runtime, so prepare all changes before one restart:
+
+1. build the maintained fork;
+2. install the managed Pi extension with `./target/debug/herdr`;
+3. disable or remove the old package-owned lifecycle authority without reloading
+   Pi in between;
+4. restart Pi once;
+5. verify that detached work remains `working`, blocked state takes precedence,
+   and completion returns the pane to idle.
 
 ## Relationship to Pi extensions
 
