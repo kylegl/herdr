@@ -1,6 +1,50 @@
 # herdr
 
+## Issue tracker
+
+GitHub Issues are canonical and pull requests are excluded from the request surface. See `.agents/issue-tracker.md`.
+
+## Triage labels
+
+The default five-role vocabulary is configured. See `.agents/triage-labels.md`.
+
+## Domain docs
+
+This repository uses the single-context layout. See `.agents/domain.md`.
+
+## Structural codebase work
+
+Use `codebase-memory` when a task requires discovering relevant code or understanding relationships across files or symbols. For work confined to one already-known file, inspect the source directly.
+
+When it applies, establish the structural picture from the graph before broad source exploration.
+
+- Follow the skill's freshness and evidence workflow.
+- Use graph findings to select files and symbols for targeted source inspection; use text search to verify findings and cover graph gaps.
+- Before proposing or making structural changes, read `.agents/CONTEXT.md` and relevant ADRs.
+- Treat structural conclusions as complete only when material graph findings are verified against source and any freshness or coverage limits are stated.
+
 Terminal based agent runtime for coding agents.
+
+## kylegl Fork Guardrail
+
+This checkout is the maintained `kylegl/herdr` fork when `origin` resolves to
+`kylegl/herdr`. In that fork:
+
+- `origin` is the only writable remote: `git@github.com:kylegl/herdr.git`.
+- `upstream` is the read-only source: `https://github.com/herdrdev/herdr.git`.
+- Never commit or push custom work to `herdrdev/herdr`, and never enable an
+  `upstream` push URL. Upstream contributions require their own explicitly
+  approved workflow under the external-contributor rules below.
+- Fork `master` carries the maintained Pi lifecycle extension patch. Start work
+  on a task branch from `master`, push it only to `origin`, and target pull
+  requests at `kylegl/herdr:master`.
+- Keep the fork current by merging `upstream/master` into fork `master`; do not
+  rebase or force-push published fork history.
+- Before editing or pushing, run `scripts/fork-preflight.sh`. Stop if it reports
+  a remote, tracking, or repository mismatch.
+
+See `FORK_MAINTENANCE.md` for the authoritative sync, development, installation,
+and upstream-adoption procedures.
 
 ## Scope and Audience
 
