@@ -1,7 +1,7 @@
 # kylegl/herdr fork maintenance
 
 This repository is the maintained fork used to extend Herdr's official Pi
-lifecycle integration with a package-neutral background-work snapshot protocol.
+lifecycle integration with a package-neutral `herdr:busy` sibling-event overlay.
 The integration remains part of the Herdr source tree and is installed by the
 Herdr binary.
 
@@ -68,7 +68,7 @@ git push origin master
 ```
 
 Resolve conflicts in favor of current upstream behavior while preserving the
-background-work protocol. Pay particular attention to:
+busy overlay. Pay particular attention to:
 
 - `src/integration/assets/pi/herdr-agent-state.ts`
 - `src/integration/assets/herdr-agent-state.test.ts`
@@ -78,15 +78,14 @@ background-work protocol. Pay particular attention to:
 After every sync, verify that the Pi integration still:
 
 1. reports native foreground lifecycle and session identity;
-2. accepts complete provider snapshots scoped to the active Pi session;
-3. requests fresh snapshots during startup and reload;
-4. aggregates `blocked`, foreground `working`, background `working`, then `idle`;
-5. remains inert outside an eligible Herdr-managed Pi TUI;
-6. tolerates missed, duplicate, and out-of-order extension publications.
+2. consumes counted `herdr:busy` `{ active, label? }` sibling events;
+3. aggregates `blocked`, foreground `working`, busy-overlay `working`, then `idle`;
+4. remains inert outside an eligible Herdr-managed Pi TUI;
+5. preserves socket ordering, retries, reload handling, and platform mapping.
 
-If original Herdr adopts an equivalent protocol, stop before resolving the
-overlap. Compare contracts and tests, migrate adapters to the upstream contract,
-and remove the fork patch deliberately rather than carrying both implementations.
+If original Herdr adopts an equivalent busy overlay, stop before resolving the
+overlap. Compare behavior and tests, then remove the fork patch deliberately
+rather than carrying both implementations.
 
 ## Pi integration development
 
@@ -104,8 +103,26 @@ src/integration/assets/herdr-agent-state.test.ts
 ```
 
 Keep the lifecycle authority package-neutral. It must not import or name
-`pi-subagents`. Extensions communicate through the bounded snapshot and refresh
-events; each extension owns its own adapter.
+`pi-subagents`. A sibling extension may hold semantic working state by emitting
+`herdr:busy` with `{ active: true, label? }` and must later balance that ownership
+with one `{ active: false }`. Label changes should clear and reacquire the count.
+The existing `herdr:blocked` overlay retains higher precedence.
+
+### Patch provenance
+
+The counted busy overlay is adapted from Magoz's public local Pi integration
+patch:
+
+- https://github.com/magoz/.dotfiles/blob/f0a2696ab7a905e4a98e0c2a3ffb31f900e6963c/pi/.pi/agent/extensions/herdr-agent-state.ts
+
+The Herdr direction proposal and original explanation are recorded in Discussion
+#1274, comment `discussioncomment-17868530`:
+
+- https://github.com/herdrdev/herdr/discussions/1274#discussioncomment-17868530
+
+`nicobailon/pi-subagents` later shipped the producer side as a forward-compatible
+sibling event in PR #730. This fork carries only the generic Herdr consumer and
+does not depend on or import that package.
 
 Follow the integration-version rules in `AGENTS.md`. Run focused asset tests
 while developing and `just check` before integrating changes into fork `master`.
@@ -127,6 +144,7 @@ is active and reinstall from the maintained fork when necessary.
 
 ## Relationship to Pi extensions
 
-The Herdr fork owns the lifecycle authority and protocol. `pi-subagents` and
-other Pi extensions own only provider adapters that publish snapshots. They
-must not ship copied lifecycle-authority implementations.
+The Herdr fork remains the sole socket lifecycle authority. Pi extensions may
+publish the generic counted `herdr:busy` sibling event but must not ship copied
+lifecycle-authority implementations. No Pi extension is a source dependency of
+this fork patch.

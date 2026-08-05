@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=pi
-// HERDR_INTEGRATION_VERSION=8
+// HERDR_INTEGRATION_VERSION=9
 // @ts-nocheck
 
 import net from "node:net";
@@ -180,6 +180,8 @@ export default function (pi) {
   let agentActive = false;
   let blockedCount = 0;
   let blockedMessage: string | undefined;
+  let busyCount = 0;
+  let busyMessage: string | undefined;
   let lastState: AgentState | undefined;
   let lastMessage: string | undefined;
   let rootSession = false;
@@ -190,6 +192,9 @@ export default function (pi) {
     }
     if (agentActive) {
       return { state: "working" as const, message: undefined };
+    }
+    if (busyCount > 0) {
+      return { state: "working" as const, message: busyMessage };
     }
     return { state: "idle" as const, message: undefined };
   }
@@ -203,6 +208,24 @@ export default function (pi) {
     lastMessage = next.message;
     queueState(next.state, next.message);
   }
+
+  pi.events.on("herdr:busy", (data) => {
+    if (!rootSession) {
+      return;
+    }
+    if (!data?.active) {
+      busyCount = Math.max(0, busyCount - 1);
+      if (busyCount === 0) {
+        busyMessage = undefined;
+      }
+      publishState();
+      return;
+    }
+
+    busyCount += 1;
+    busyMessage = data.label;
+    publishState();
+  });
 
   pi.events.on("herdr:blocked", (data) => {
     if (!rootSession) {
