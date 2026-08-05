@@ -43,8 +43,8 @@ This checkout is the maintained `kylegl/herdr` fork when `origin` resolves to
 - Before editing or pushing, run `scripts/fork-preflight.sh`. Stop if it reports
   a remote, tracking, or repository mismatch.
 
-See `FORK_MAINTENANCE.md` for the authoritative sync, development, installation,
-and upstream-adoption procedures.
+See `.agents/docs/fork-maintenance.md` for the authoritative sync, development,
+installation, and upstream-adoption procedures.
 
 ## Scope and Audience
 
