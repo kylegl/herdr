@@ -30,6 +30,20 @@ scripts/fork-preflight.sh
 Do not change `origin` to the original project. Do not create a writable
 `upstream` push URL. Do not use `--force` when pushing fork `master`.
 
+### Local checkout layout
+
+On this workstation, `/home/linkdevk/repos/herdr` is a worktree container, not
+a source checkout. Its shared Git directory is `.bare`, and the maintained fork
+checkout is:
+
+```text
+/home/linkdevk/repos/herdr/master
+```
+
+Run fork builds, maintenance commands, and Pi integration development from that
+`master` worktree. Normal Herdr startup uses the standalone executable at
+`~/.local/bin/herdr`; it does not execute from the checkout.
+
 ## Branch policy
 
 Fork `master` contains both upstream Herdr history and our maintained patch.
@@ -113,12 +127,12 @@ The existing `herdr:blocked` overlay retains higher precedence.
 The counted busy overlay is adapted from Magoz's public local Pi integration
 patch:
 
-- https://github.com/magoz/.dotfiles/blob/f0a2696ab7a905e4a98e0c2a3ffb31f900e6963c/pi/.pi/agent/extensions/herdr-agent-state.ts
+- <https://github.com/magoz/.dotfiles/blob/f0a2696ab7a905e4a98e0c2a3ffb31f900e6963c/pi/.pi/agent/extensions/herdr-agent-state.ts>
 
-The Herdr direction proposal and original explanation are recorded in Discussion
-#1274, comment `discussioncomment-17868530`:
+The Herdr direction proposal and original explanation are recorded in
+Discussion #1274, comment `discussioncomment-17868530`:
 
-- https://github.com/herdrdev/herdr/discussions/1274#discussioncomment-17868530
+- <https://github.com/herdrdev/herdr/discussions/1274#discussioncomment-17868530>
 
 `nicobailon/pi-subagents` later shipped the producer side as a forward-compatible
 sibling event in PR #730. This fork carries only the generic Herdr consumer and
@@ -140,12 +154,16 @@ session. Keep these three artifacts distinct:
 The running Herdr server may remain the normal upstream release because this
 patch does not change the socket protocol. Only the installer must come from the
 fork so it writes the version 9 Pi asset containing the `herdr:busy` listener.
-Build the fork and invoke that binary explicitly:
+Build the fork from `/home/linkdevk/repos/herdr/master`. On this workstation,
+install the resulting standalone executable to `~/.local/bin/herdr`, then use
+that installed fork binary to refresh and inspect the managed Pi extension:
 
 ```bash
+cd /home/linkdevk/repos/herdr/master
 cargo build
-./target/debug/herdr integration install pi
-./target/debug/herdr integration status
+install -m 755 target/debug/herdr ~/.local/bin/herdr
+~/.local/bin/herdr integration install pi
+~/.local/bin/herdr integration status
 ```
 
 Confirm the deployed asset rather than assuming that a fork checkout or build is
