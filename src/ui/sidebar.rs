@@ -12,7 +12,7 @@ use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_icon, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
-use crate::app::state::{AgentPanelSort, Palette, SidebarFocus};
+use crate::app::state::{AgentPanelSort, Palette, SidebarNavigationTarget};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
@@ -66,40 +66,6 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, 
     let ws_area = Rect::new(content.x, content.y, content.width, ws_h);
     let detail_area = Rect::new(content.x, content.y + ws_h, content.width, detail_h);
     (ws_area, detail_area)
-}
-
-fn expanded_sidebar_section_frames(area: Rect, split_ratio: f32) -> (Rect, Rect) {
-    let (spaces, agents) = expanded_sidebar_sections(area, split_ratio);
-    let agents = if agents == Rect::default() {
-        agents
-    } else {
-        Rect::new(
-            agents.x,
-            agents.y.saturating_sub(1),
-            agents.width,
-            agents.height.saturating_add(1),
-        )
-    };
-    (spaces, agents)
-}
-
-fn sidebar_section_inner(area: Rect) -> Rect {
-    if area.width <= 2 || area.height <= 2 {
-        return Rect::default();
-    }
-    Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2)
-}
-
-pub(crate) fn expanded_sidebar_content_sections(
-    area: Rect,
-    split_ratio: f32,
-    pane_borders: bool,
-) -> (Rect, Rect) {
-    if !pane_borders {
-        return expanded_sidebar_sections(area, split_ratio);
-    }
-    let (spaces, agents) = expanded_sidebar_section_frames(area, split_ratio);
-    (sidebar_section_inner(spaces), sidebar_section_inner(agents))
 }
 
 pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
@@ -345,8 +311,7 @@ pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], i
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let (ws_area, _) =
-        expanded_sidebar_content_sections(area, app.sidebar_section_split, app.pane_borders);
+    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
@@ -470,7 +435,6 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     entries
 }
 
-#[cfg(test)]
 pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
     let (ws_area, _) = expanded_sidebar_sections(area, split_ratio);
     ws_area
@@ -695,8 +659,7 @@ pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
 ) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
-    let (ws_area, _) =
-        expanded_sidebar_content_sections(area, app.sidebar_section_split, app.pane_borders);
+    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
     }
@@ -1016,8 +979,15 @@ pub(super) fn render_sidebar(
     frame
         .buffer_mut()
         .set_style(area, Style::default().bg(p.sidebar_bg));
-    let is_navigating = matches!(app.mode, Mode::Navigate);
-    let sep_style = Style::default().fg(p.surface_dim);
+    let spaces_focused = matches!(
+        app.sidebar_navigation,
+        Some(SidebarNavigationTarget::Spaces)
+    );
+    let sep_style = if app.sidebar_navigation.is_some() {
+        Style::default().fg(p.accent)
+    } else {
+        Style::default().fg(p.surface_dim)
+    };
 
     let sep_x = area.x + area.width.saturating_sub(1);
     let buf = frame.buffer_mut();
@@ -1026,97 +996,11 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (spaces_frame, agents_frame) =
-        expanded_sidebar_section_frames(area, app.sidebar_section_split);
-    let (ws_area, detail_area) =
-        expanded_sidebar_content_sections(area, app.sidebar_section_split, app.pane_borders);
+    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
 
-    if app.pane_borders {
-        render_sidebar_section_frames(
-            frame,
-            spaces_frame,
-            agents_frame,
-            p.overlay0,
-            app.sidebar_section_focus_active
-                .then_some((app.sidebar_focus, p.accent)),
-        );
-    }
-
-    render_workspace_list(
-        app,
-        terminal_runtimes,
-        frame,
-        ws_area,
-        is_navigating && app.sidebar_focus == SidebarFocus::Spaces,
-    );
+    render_workspace_list(app, terminal_runtimes, frame, ws_area, spaces_focused);
     render_agent_detail(app, terminal_runtimes, frame, detail_area);
     render_sidebar_toggle(app, frame, area, false, p);
-}
-
-fn render_sidebar_section_frames(
-    frame: &mut Frame,
-    spaces: Rect,
-    agents: Rect,
-    base_color: ratatui::style::Color,
-    focus: Option<(SidebarFocus, ratatui::style::Color)>,
-) {
-    if spaces.width < 2 || spaces.height < 2 || agents.height < 2 {
-        return;
-    }
-
-    let left = spaces.x;
-    let right = spaces.x + spaces.width - 1;
-    let top = spaces.y;
-    let divider = agents.y;
-    let bottom = agents.y + agents.height - 1;
-    let buf = frame.buffer_mut();
-
-    let color_for = |section: SidebarFocus| match focus {
-        Some((focused, color)) if focused == section => color,
-        _ => base_color,
-    };
-    let spaces_color = color_for(SidebarFocus::Spaces);
-    let agents_color = color_for(SidebarFocus::Agents);
-    let divider_color = focus.map_or(base_color, |(_, color)| color);
-    let (divider_left, divider_right) = match focus {
-        Some((SidebarFocus::Spaces, _)) => ("└", "┘"),
-        Some((SidebarFocus::Agents, _)) => ("┌", "┐"),
-        None => ("├", "┤"),
-    };
-
-    for x in left + 1..right {
-        buf[(x, top)].set_symbol("─");
-        buf[(x, top)].set_style(Style::default().fg(spaces_color));
-        buf[(x, divider)].set_symbol("─");
-        buf[(x, divider)].set_style(Style::default().fg(divider_color));
-        buf[(x, bottom)].set_symbol("─");
-        buf[(x, bottom)].set_style(Style::default().fg(agents_color));
-    }
-
-    for y in top + 1..divider {
-        for x in [left, right] {
-            buf[(x, y)].set_symbol("│");
-            buf[(x, y)].set_style(Style::default().fg(spaces_color));
-        }
-    }
-    for y in divider + 1..bottom {
-        for x in [left, right] {
-            buf[(x, y)].set_symbol("│");
-            buf[(x, y)].set_style(Style::default().fg(agents_color));
-        }
-    }
-
-    for (x, y, symbol, color) in [
-        (left, top, "┌", spaces_color),
-        (right, top, "┐", spaces_color),
-        (left, divider, divider_left, divider_color),
-        (right, divider, divider_right, divider_color),
-        (left, bottom, "└", agents_color),
-        (right, bottom, "┘", agents_color),
-    ] {
-        buf[(x, y)].set_symbol(symbol);
-        buf[(x, y)].set_style(Style::default().fg(color));
-    }
 }
 
 fn resolved_token_spans(
@@ -1557,12 +1441,19 @@ fn render_agent_detail(
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    let agents_focused = app.mode == Mode::Navigate && app.sidebar_focus == SidebarFocus::Agents;
+    let selected_agent = match app.sidebar_navigation {
+        Some(SidebarNavigationTarget::Agent(pane_id)) => Some(pane_id),
+        _ => None,
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             " agents",
             Style::default()
-                .fg(if agents_focused { p.accent } else { p.overlay0 })
+                .fg(if selected_agent.is_some() {
+                    p.accent
+                } else {
+                    p.overlay0
+                })
                 .add_modifier(Modifier::BOLD),
         )])),
         Rect::new(area.x, area.y + 1, area.width, 1),
@@ -1614,7 +1505,7 @@ fn render_agent_detail(
         }
 
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-        let is_selected = agents_focused && index == app.selected_agent;
+        let is_selected = selected_agent == Some(detail.pane_id);
         let row_style = if is_selected {
             Style::default().bg(p.surface0)
         } else if is_active {
@@ -1769,7 +1660,6 @@ mod tests {
     #[test]
     fn default_agent_rows_remove_redundant_state_text() {
         let mut app = crate::app::state::AppState::test_new();
-        app.pane_borders = false;
         let workspace = Workspace::test_new("one");
         let pane_id = workspace.tabs[0].root_pane;
         app.workspaces = vec![workspace];
@@ -2114,7 +2004,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn oversized_space_layout_is_clipped_to_the_section_body() {
         let mut app = crate::app::state::AppState::test_new();
-        app.pane_borders = false;
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.sidebar_spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]; 6];
         let area = Rect::new(0, 0, 20, 10);
@@ -2630,6 +2519,21 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn sidebar_navigation_focus_does_not_shrink_narrow_content_geometry() {
+        let area = Rect::new(0, 0, 8, 12);
+        let normal = expanded_sidebar_sections(area, 0.5);
+        let mut app = AppState::test_new();
+        app.sidebar_navigation = Some(SidebarNavigationTarget::Spaces);
+
+        assert_eq!(
+            expanded_sidebar_sections(area, app.sidebar_section_split),
+            normal
+        );
+        assert_eq!(normal.0.width, area.width.saturating_sub(1));
+        assert_eq!(normal.1.width, area.width.saturating_sub(1));
+    }
+
+    #[test]
     fn expanded_sidebar_sections_handle_tiny_heights() {
         let (ws_area, detail_area) = expanded_sidebar_sections(Rect::new(0, 0, 20, 5), 0.9);
 
@@ -2762,7 +2666,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn desktop_worktree_connector_uses_full_list_at_viewport_boundary() {
         let mut app = AppState::test_new();
-        app.pane_borders = false;
         app.workspaces = vec![
             workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
             workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),

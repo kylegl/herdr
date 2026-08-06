@@ -469,7 +469,7 @@ fn render_pane_borders(
         {
             continue;
         }
-        let focused = !app.sidebar_section_focus_active
+        let focused = app.sidebar_navigation.is_none()
             && pane_infos
                 .iter()
                 .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
@@ -646,7 +646,7 @@ fn render_pane_border_titles(
         if start_x >= end_x {
             continue;
         }
-        let visually_focused = info.is_focused && !app.sidebar_section_focus_active;
+        let visually_focused = info.is_focused && app.sidebar_navigation.is_none();
         let color = if visually_focused {
             app.palette.accent
         } else {
