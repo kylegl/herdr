@@ -1000,7 +1000,85 @@ pub(super) fn render_sidebar(
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, spaces_focused);
     render_agent_detail(app, terminal_runtimes, frame, detail_area);
+    if app.pane_borders && app.sidebar_navigation.is_some() {
+        render_sidebar_section_frames(frame, ws_area, detail_area, app, p);
+    }
     render_sidebar_toggle(app, frame, area, false, p);
+}
+
+fn render_sidebar_section_frames(
+    frame: &mut Frame,
+    spaces: Rect,
+    agents: Rect,
+    app: &AppState,
+    p: &Palette,
+) {
+    if spaces.width < 2 || spaces.height < 2 || agents.height < 2 {
+        return;
+    }
+
+    let left = spaces.x;
+    let right = spaces.x + spaces.width - 1;
+    let top = spaces.y;
+    let divider = agents.y.saturating_sub(1);
+    let bottom = agents.y + agents.height - 1;
+    let spaces_focused = matches!(
+        app.sidebar_navigation,
+        Some(SidebarNavigationTarget::Spaces)
+    );
+    let agents_focused = matches!(
+        app.sidebar_navigation,
+        Some(SidebarNavigationTarget::Agent(_))
+    );
+    let spaces_color = if spaces_focused { p.accent } else { p.overlay0 };
+    let agents_color = if agents_focused { p.accent } else { p.overlay0 };
+    let divider_color = if app.sidebar_navigation.is_some() {
+        p.accent
+    } else {
+        p.overlay0
+    };
+    let (divider_left, divider_right) = if spaces_focused {
+        ("└", "┘")
+    } else if agents_focused {
+        ("┌", "┐")
+    } else {
+        ("├", "┤")
+    };
+    let buf = frame.buffer_mut();
+
+    for x in left + 1..right {
+        buf[(x, top)].set_symbol("─");
+        buf[(x, top)].set_style(Style::default().fg(spaces_color));
+        buf[(x, divider)].set_symbol("─");
+        buf[(x, divider)].set_style(Style::default().fg(divider_color));
+        buf[(x, bottom)].set_symbol("─");
+        buf[(x, bottom)].set_style(Style::default().fg(agents_color));
+    }
+
+    for y in top + 1..divider {
+        for x in [left, right] {
+            buf[(x, y)].set_symbol("│");
+            buf[(x, y)].set_style(Style::default().fg(spaces_color));
+        }
+    }
+    for y in divider + 1..bottom {
+        for x in [left, right] {
+            buf[(x, y)].set_symbol("│");
+            buf[(x, y)].set_style(Style::default().fg(agents_color));
+        }
+    }
+
+    for (x, y, symbol, color) in [
+        (left, top, "┌", spaces_color),
+        (right, top, "┐", spaces_color),
+        (left, divider, divider_left, divider_color),
+        (right, divider, divider_right, divider_color),
+        (left, bottom, "└", agents_color),
+        (right, bottom, "┘", agents_color),
+    ] {
+        buf[(x, y)].set_symbol(symbol);
+        buf[(x, y)].set_style(Style::default().fg(color));
+    }
 }
 
 fn resolved_token_spans(
@@ -1655,6 +1733,78 @@ mod tests {
             .content
             .iter()
             .all(|cell| cell.bg == app.palette.sidebar_bg));
+    }
+
+    #[test]
+    fn focused_sidebar_section_renders_distinct_overlay_frames() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces.clear();
+        app.active = None;
+        app.pane_borders = true;
+        app.sidebar_navigation = Some(SidebarNavigationTarget::Spaces);
+        let area = Rect::new(0, 0, 26, 20);
+        let mut terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let (_, agents) = expanded_sidebar_sections(area, app.sidebar_section_split);
+        let divider_y = agents.y - 1;
+        for (x, y, glyph) in [
+            (0, 0, "┌"),
+            (1, 0, "─"),
+            (24, 0, "┐"),
+            (0, divider_y, "└"),
+            (1, divider_y, "─"),
+            (24, divider_y, "┘"),
+        ] {
+            assert_eq!(buffer[(x, y)].symbol(), glyph);
+            assert_eq!(buffer[(x, y)].style().fg, Some(app.palette.accent));
+            assert_eq!(buffer[(x, y)].style().bg, Some(app.palette.sidebar_bg));
+        }
+        for (x, y, glyph) in [
+            (0, agents.y, "│"),
+            (24, agents.y, "│"),
+            (0, area.height - 1, "└"),
+            (1, area.height - 1, "─"),
+        ] {
+            assert_eq!(buffer[(x, y)].symbol(), glyph);
+            assert_eq!(buffer[(x, y)].style().fg, Some(app.palette.overlay0));
+            assert_eq!(buffer[(x, y)].style().bg, Some(app.palette.sidebar_bg));
+        }
+
+        let workspace = Workspace::test_new("agent");
+        let pane_id = workspace.tabs[0].root_pane;
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Pi);
+        app.sidebar_navigation = Some(SidebarNavigationTarget::Agent(pane_id));
+        let mut agent_terminal = Terminal::new(TestBackend::new(26, 20)).unwrap();
+        agent_terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let agent_buffer = agent_terminal.backend().buffer();
+
+        for (x, y, glyph, color) in [
+            (0, 0, "┌", app.palette.overlay0),
+            (0, divider_y, "┌", app.palette.accent),
+            (24, divider_y, "┐", app.palette.accent),
+            (0, agents.y, "│", app.palette.accent),
+            (0, area.height - 1, "└", app.palette.accent),
+            (1, area.height - 1, "─", app.palette.accent),
+        ] {
+            assert_eq!(agent_buffer[(x, y)].symbol(), glyph);
+            assert_eq!(agent_buffer[(x, y)].style().fg, Some(color));
+            assert_eq!(
+                agent_buffer[(x, y)].style().bg,
+                Some(app.palette.sidebar_bg)
+            );
+        }
     }
 
     #[test]

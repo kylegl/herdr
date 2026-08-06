@@ -149,6 +149,20 @@ impl App {
             return;
         }
 
+        if self.state.sidebar_navigation.is_some() {
+            if let Some(
+                action @ (NavigateAction::FocusPaneLeft
+                | NavigateAction::FocusPaneDown
+                | NavigateAction::FocusPaneUp
+                | NavigateAction::FocusPaneRight),
+            ) = non_indexed_action_for_key(&self.state, &raw_key, BindingDispatch::Direct)
+            {
+                if self.handle_sidebar_navigation_action(action) {
+                    return;
+                }
+            }
+        }
+
         if matches!(
             self.state.sidebar_navigation,
             Some(SidebarNavigationTarget::Agent(_))
@@ -1370,6 +1384,12 @@ fn navigate_reserved_action_for_key(state: &AppState, key: &TerminalKey) -> Opti
     if modifiers.is_empty() {
         match code {
             KeyCode::Enter => {
+                if matches!(
+                    state.sidebar_navigation,
+                    Some(SidebarNavigationTarget::Agent(_))
+                ) {
+                    return None;
+                }
                 return (!state.workspaces.is_empty()).then_some(NavigateAction::SwitchWorkspace(
                     state
                         .visible_workspace_order()
@@ -2133,6 +2153,20 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_sidebar_agent_focuses_its_pane() {
+        let mut app = app_with_test_workspaces(&["one", "two"]);
+        let pane_ids = mark_test_agents(&mut app);
+        app.state.mode = Mode::Navigate;
+        app.state.sidebar_navigation = Some(SidebarNavigationTarget::Agent(pane_ids[1]));
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.sidebar_navigation, None);
+    }
+
+    #[test]
     fn ordinary_navigate_right_does_not_exit_workspace_picker() {
         let mut app = app_with_test_workspaces(&["one"]);
         app.state.mode = Mode::Navigate;
@@ -2407,6 +2441,19 @@ mod tests {
         );
 
         assert_eq!(state.request_new_linked_worktree, Some(0));
+    }
+
+    #[test]
+    fn configured_direct_focus_binding_exits_sidebar_navigation() {
+        let mut app = app_with_test_workspaces(&["test"]);
+        app.state.mode = Mode::Navigate;
+        app.state.sidebar_navigation = Some(SidebarNavigationTarget::Spaces);
+        app.state.keybinds.focus_pane_right = crate::config::ActionKeybinds::direct("alt+right");
+
+        app.handle_navigate_key(TerminalKey::new(KeyCode::Right, KeyModifiers::ALT));
+
+        assert_eq!(app.state.sidebar_navigation, None);
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]
