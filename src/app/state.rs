@@ -815,6 +815,12 @@ pub struct ViewState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarNavigationTarget {
+    Spaces,
+    Agent(PaneId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Onboarding,
     ReleaseNotes,
@@ -1464,6 +1470,9 @@ pub struct AppState {
     pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
+    /// Keyboard navigation target in the expanded sidebar. `None` keeps the
+    /// ordinary workspace picker behavior.
+    pub sidebar_navigation: Option<SidebarNavigationTarget>,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -1827,6 +1836,7 @@ impl AppState {
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
+            sidebar_navigation: None,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,

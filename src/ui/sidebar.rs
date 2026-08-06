@@ -12,7 +12,7 @@ use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{state_icon, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
-use crate::app::state::{AgentPanelSort, Palette};
+use crate::app::state::{AgentPanelSort, Palette, SidebarNavigationTarget};
 use crate::app::{AppState, Mode};
 use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
@@ -979,8 +979,11 @@ pub(super) fn render_sidebar(
     frame
         .buffer_mut()
         .set_style(area, Style::default().bg(p.sidebar_bg));
-    let is_navigating = matches!(app.mode, Mode::Navigate);
-    let sep_style = if is_navigating {
+    let spaces_focused = matches!(
+        app.sidebar_navigation,
+        Some(SidebarNavigationTarget::Spaces)
+    );
+    let sep_style = if app.sidebar_navigation.is_some() {
         Style::default().fg(p.accent)
     } else {
         Style::default().fg(p.surface_dim)
@@ -995,7 +998,7 @@ pub(super) fn render_sidebar(
 
     let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
 
-    render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
+    render_workspace_list(app, terminal_runtimes, frame, ws_area, spaces_focused);
     render_agent_detail(app, terminal_runtimes, frame, detail_area);
     render_sidebar_toggle(app, frame, area, false, p);
 }
@@ -1438,10 +1441,20 @@ fn render_agent_detail(
         Rect::new(area.x, area.y, area.width, 1),
     );
 
+    let selected_agent = match app.sidebar_navigation {
+        Some(SidebarNavigationTarget::Agent(pane_id)) => Some(pane_id),
+        _ => None,
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             " agents",
-            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(if selected_agent.is_some() {
+                    p.accent
+                } else {
+                    p.overlay0
+                })
+                .add_modifier(Modifier::BOLD),
         )])),
         Rect::new(area.x, area.y + 1, area.width, 1),
     );
@@ -1492,17 +1505,20 @@ fn render_agent_detail(
         }
 
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
-        let row_style = if is_active {
+        let is_selected = selected_agent == Some(detail.pane_id);
+        let row_style = if is_selected {
+            Style::default().bg(p.surface0)
+        } else if is_active {
             Style::default().bg(p.surface_dim)
         } else {
             Style::default()
         };
-        let name_style = if is_active {
+        let name_style = if is_selected || is_active {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
         };
-        let status_style = if is_active {
+        let status_style = if is_selected || is_active {
             Style::default().fg(label_color)
         } else {
             Style::default().fg(label_color).add_modifier(Modifier::DIM)
@@ -2500,6 +2516,21 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let entries = agent_panel_entries(&app);
         assert_eq!(entries[0].primary_label, "bridge");
         assert_eq!(entries[0].agent_label.as_deref(), Some("planner"));
+    }
+
+    #[test]
+    fn sidebar_navigation_focus_does_not_shrink_narrow_content_geometry() {
+        let area = Rect::new(0, 0, 8, 12);
+        let normal = expanded_sidebar_sections(area, 0.5);
+        let mut app = AppState::test_new();
+        app.sidebar_navigation = Some(SidebarNavigationTarget::Spaces);
+
+        assert_eq!(
+            expanded_sidebar_sections(area, app.sidebar_section_split),
+            normal
+        );
+        assert_eq!(normal.0.width, area.width.saturating_sub(1));
+        assert_eq!(normal.1.width, area.width.saturating_sub(1));
     }
 
     #[test]

@@ -66,6 +66,27 @@ issue, discussion, or branch against `herdrdev/herdr` is a separate upstream
 contribution workflow and requires explicit user direction plus Herdr's
 external-contributor process.
 
+### Integrating fork-only work
+
+Sync fork `master` from upstream before integrating a task branch. After the
+sync passes `just check` and is pushed to `origin`, rebase the unpublished task
+branch onto the updated fork `master`, rerun `just check`, and push the task
+branch only to `origin`:
+
+```bash
+# In the shared master worktree, follow "Syncing from original Herdr" below.
+
+# In the task worktree:
+git rebase master
+just check
+git push -u origin fork/<short-task-name>
+```
+
+Open a pull request against `kylegl/herdr:master` and prefer squash merge for
+fork-only features. This leaves one clear, revertible patch commit on fork
+`master` while upstream history continues to arrive through merge commits.
+Never rebase or force-push published fork `master`.
+
 ## Syncing from original Herdr
 
 Never rebase published fork `master`. Merge original Herdr into it so the custom
