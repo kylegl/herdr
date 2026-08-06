@@ -449,7 +449,9 @@ pub(super) fn open_new_tab_dialog(state: &mut AppState) {
 }
 
 pub(super) fn leave_modal(state: &mut AppState) {
-    if state.active.is_some() {
+    if state.sidebar_section_focus_active {
+        state.mode = Mode::Navigate;
+    } else if state.active.is_some() {
         state.mode = Mode::Terminal;
     } else {
         state.mode = Mode::Navigate;

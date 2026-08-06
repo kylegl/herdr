@@ -469,9 +469,10 @@ fn render_pane_borders(
         {
             continue;
         }
-        let focused = pane_infos
-            .iter()
-            .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
+        let focused = !app.sidebar_section_focus_active
+            && pane_infos
+                .iter()
+                .any(|info| info.is_focused && line_touches_pane(x, y, info, app.pane_gaps));
         let symbol = line_cell_symbol(line);
         if symbol.is_empty() {
             continue;
@@ -645,13 +646,14 @@ fn render_pane_border_titles(
         if start_x >= end_x {
             continue;
         }
-        let color = if info.is_focused {
+        let visually_focused = info.is_focused && !app.sidebar_section_focus_active;
+        let color = if visually_focused {
             app.palette.accent
         } else {
             app.palette.overlay0
         };
         let mut style = Style::default().fg(color);
-        if info.is_focused {
+        if visually_focused {
             style = style.add_modifier(Modifier::BOLD);
         }
         buf.set_stringn(

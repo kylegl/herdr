@@ -13,7 +13,7 @@ use ratatui::layout::Direction;
 
 use crate::{
     app::{
-        state::{AppState, Mode},
+        state::{AppState, Mode, SidebarFocus},
         App,
     },
     input::TerminalKey,
@@ -128,30 +128,111 @@ impl App {
         let key = raw_key.as_key_event();
         self.state.update_dismissed = true;
 
-        if key.code == KeyCode::Esc || self.state.is_prefix_key(&raw_key) {
+        if key.code == KeyCode::Esc {
             leave_navigate_mode(&mut self.state);
             return;
         }
+        if self.state.is_prefix_key(&raw_key) {
+            if self.state.sidebar_section_focus_active {
+                self.state.mode = Mode::Prefix;
+            } else {
+                leave_navigate_mode(&mut self.state);
+            }
+            return;
+        }
 
+        // PROTOTYPE: direct directional bindings move attention between the
+        // expanded sidebar sections and the pane layout without activating a row.
         if self
             .state
             .keybinds
-            .navigate
-            .workspace_up
+            .focus_pane_right
             .matches_direct_key(&raw_key)
         {
-            self.state.move_selected_workspace_by_visible_delta(-1);
+            leave_navigate_mode(&mut self.state);
             return;
         }
         if self
             .state
             .keybinds
-            .navigate
-            .workspace_down
+            .focus_pane_down
             .matches_direct_key(&raw_key)
+            && self.state.sidebar_focus == SidebarFocus::Spaces
         {
-            self.state.move_selected_workspace_by_visible_delta(1);
+            self.state.sidebar_focus = SidebarFocus::Agents;
+            self.state.sidebar_section_focus_active = true;
+            self.select_focused_agent_entry();
             return;
+        }
+        if self
+            .state
+            .keybinds
+            .focus_pane_up
+            .matches_direct_key(&raw_key)
+            && self.state.sidebar_focus == SidebarFocus::Agents
+        {
+            self.state.sidebar_focus = SidebarFocus::Spaces;
+            return;
+        }
+
+        if self.state.sidebar_focus == SidebarFocus::Agents {
+            let entry_count = crate::ui::agent_panel_entries(&self.state).len();
+            if self
+                .state
+                .keybinds
+                .navigate
+                .workspace_up
+                .matches_direct_key(&raw_key)
+            {
+                self.state.selected_agent = self.state.selected_agent.saturating_sub(1);
+                self.state
+                    .ensure_agent_panel_entry_visible(self.state.selected_agent);
+                return;
+            }
+            if self
+                .state
+                .keybinds
+                .navigate
+                .workspace_down
+                .matches_direct_key(&raw_key)
+            {
+                if entry_count > 0 {
+                    self.state.selected_agent =
+                        (self.state.selected_agent + 1).min(entry_count - 1);
+                    self.state
+                        .ensure_agent_panel_entry_visible(self.state.selected_agent);
+                }
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                if let Some((ws_idx, pane_id)) = self.agent_entry_target(self.state.selected_agent)
+                {
+                    self.focus_pane_internal_via_api(ws_idx, pane_id);
+                    leave_navigate_mode(&mut self.state);
+                }
+                return;
+            }
+        } else {
+            if self
+                .state
+                .keybinds
+                .navigate
+                .workspace_up
+                .matches_direct_key(&raw_key)
+            {
+                self.state.move_selected_workspace_by_visible_delta(-1);
+                return;
+            }
+            if self
+                .state
+                .keybinds
+                .navigate
+                .workspace_down
+                .matches_direct_key(&raw_key)
+            {
+                self.state.move_selected_workspace_by_visible_delta(1);
+                return;
+            }
         }
 
         if let Some(action) = navigate_reserved_action_for_key(&self.state, &raw_key) {
@@ -258,6 +339,8 @@ impl App {
             }
             NavigateAction::WorkspacePicker => {
                 self.state.mobile_switcher_scroll = 0;
+                self.state.sidebar_focus = SidebarFocus::Spaces;
+                self.state.sidebar_section_focus_active = false;
                 self.state.mode = Mode::Navigate;
             }
             NavigateAction::PreviousWorkspace => {
@@ -336,7 +419,19 @@ impl App {
                 }
             }
             NavigateAction::FocusPaneLeft => {
-                self.focus_pane_direction_in_context(NavDirection::Left, context)
+                if context == ActionContext::Direct
+                    && !self.state.sidebar_collapsed
+                    && self
+                        .directional_pane_target_from_view(NavDirection::Left)
+                        .is_none()
+                {
+                    self.state.sidebar_focus = SidebarFocus::Spaces;
+                    self.state.sidebar_section_focus_active = true;
+                    self.state.selected = self.state.active.unwrap_or(self.state.selected);
+                    self.state.mode = Mode::Navigate;
+                } else {
+                    self.focus_pane_direction_in_context(NavDirection::Left, context)
+                }
             }
             NavigateAction::FocusPaneDown => {
                 self.focus_pane_direction_in_context(NavDirection::Down, context)
@@ -736,6 +831,21 @@ impl App {
         let entries = crate::ui::agent_panel_entries(&self.state);
         let target = entries.get(idx)?;
         Some((target.ws_idx, target.pane_id))
+    }
+
+    fn select_focused_agent_entry(&mut self) {
+        let focused = self
+            .state
+            .active
+            .and_then(|idx| self.state.workspaces.get(idx))
+            .and_then(crate::workspace::Workspace::focused_pane_id);
+        let entries = crate::ui::agent_panel_entries(&self.state);
+        self.state.selected_agent = entries
+            .iter()
+            .position(|entry| Some(entry.pane_id) == focused)
+            .unwrap_or(0);
+        self.state
+            .ensure_agent_panel_entry_visible(self.state.selected_agent);
     }
 
     fn relative_agent_entry(&self, forward: bool) -> Option<(usize, usize, crate::layout::PaneId)> {
@@ -1650,6 +1760,8 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::WorkspacePicker => {
             state.mobile_switcher_scroll = 0;
+            state.sidebar_focus = SidebarFocus::Spaces;
+            state.sidebar_section_focus_active = false;
             state.mode = Mode::Navigate;
         }
         NavigateAction::PreviousWorkspace => {
@@ -1810,6 +1922,7 @@ fn workspace_can_start_worktree_action(
 }
 
 fn leave_navigate_mode(state: &mut AppState) {
+    state.sidebar_section_focus_active = false;
     if state.active.is_some() {
         state.mode = Mode::Terminal;
     }
@@ -1836,7 +1949,9 @@ fn finish_custom_command_context(
 }
 
 fn leave_command_mode(state: &mut AppState) {
-    if state.copy_mode_pane_is_focused() {
+    if state.sidebar_section_focus_active {
+        state.mode = Mode::Navigate;
+    } else if state.copy_mode_pane_is_focused() {
         state.mode = Mode::Copy;
     } else if state.active.is_some() {
         state.mode = Mode::Terminal;

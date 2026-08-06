@@ -10,7 +10,12 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        crate::ui::workspace_list_rect(sidebar, self.sidebar_section_split)
+        crate::ui::expanded_sidebar_content_sections(
+            sidebar,
+            self.sidebar_section_split,
+            self.pane_borders,
+        )
+        .0
     }
 
     pub(super) fn agent_panel_rect(&self) -> Rect {
@@ -18,9 +23,12 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        let (_, detail_area) =
-            crate::ui::expanded_sidebar_sections(sidebar, self.sidebar_section_split);
-        detail_area
+        crate::ui::expanded_sidebar_content_sections(
+            sidebar,
+            self.sidebar_section_split,
+            self.pane_borders,
+        )
+        .1
     }
 
     pub(super) fn workspace_list_scrollbar_target_at(
@@ -470,9 +478,10 @@ impl AppState {
             return false;
         }
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+        let (_, detail_area) = crate::ui::expanded_sidebar_content_sections(
             self.view.sidebar_rect,
             self.sidebar_section_split,
+            self.pane_borders,
         );
         let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
         rect.width > 0
@@ -852,9 +861,10 @@ mod tests {
         app.state.mode = Mode::Terminal;
         app.state.agent_panel_scroll = 3;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+        let (_, detail_area) = crate::ui::expanded_sidebar_content_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.pane_borders,
         );
         let toggle = crate::ui::agent_panel_toggle_rect(detail_area, app.state.agent_panel_sort);
         app.handle_mouse(mouse(
@@ -898,9 +908,10 @@ mod tests {
         app.state.selected = 0;
         app.state.mode = Mode::Terminal;
 
-        let (_, detail_area) = crate::ui::expanded_sidebar_sections(
+        let (_, detail_area) = crate::ui::expanded_sidebar_content_sections(
             app.state.view.sidebar_rect,
             app.state.sidebar_section_split,
+            app.state.pane_borders,
         );
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -1550,6 +1561,7 @@ mod tests {
     #[test]
     fn top_drop_slot_is_distinct_from_gap_below_first_workspace() {
         let mut app = app_for_mouse_test();
+        app.state.pane_borders = false;
         let first_repo = temp_git_repo("main");
         let second_repo = temp_git_repo("main");
 
@@ -1604,6 +1616,7 @@ mod tests {
     #[test]
     fn bottom_drop_slot_stays_below_last_workspace_not_footer() {
         let mut app = app_for_mouse_test();
+        app.state.pane_borders = false;
         app.state.workspaces = vec![
             Workspace::test_new("a"),
             Workspace::test_new("b"),
