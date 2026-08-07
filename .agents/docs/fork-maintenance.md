@@ -1,9 +1,10 @@
 # kylegl/herdr fork maintenance
 
 This repository is the maintained fork used to extend Herdr's official Pi
-lifecycle integration with a package-neutral `herdr:busy` sibling-event overlay.
-The integration remains part of the Herdr source tree and is installed by the
-Herdr binary.
+lifecycle integration with a package-neutral `herdr:busy` sibling-event overlay
+and explicit blocked-state tracking for Pi's interactive `ask` tool. The
+integration remains part of the Herdr source tree and is installed by the Herdr
+binary.
 
 ## Repository authority
 
@@ -114,9 +115,11 @@ After every sync, verify that the Pi integration still:
 
 1. reports native foreground lifecycle and session identity;
 2. consumes counted `herdr:busy` `{ active, label? }` sibling events;
-3. aggregates `blocked`, foreground `working`, busy-overlay `working`, then `idle`;
-4. remains inert outside an eligible Herdr-managed Pi TUI;
-5. preserves socket ordering, retries, reload handling, and platform mapping.
+3. reports an active `ask` tool call as `blocked` until that exact call finishes;
+4. aggregates explicit and Ask-derived `blocked`, foreground `working`,
+   busy-overlay `working`, then `idle`;
+5. remains inert outside an eligible Herdr-managed Pi TUI;
+6. preserves socket ordering, retries, reload handling, and platform mapping.
 
 If original Herdr adopts an equivalent busy overlay, stop before resolving the
 overlap. Compare behavior and tests, then remove the fork patch deliberately
@@ -142,6 +145,16 @@ Keep the lifecycle authority package-neutral. It must not import or name
 `herdr:busy` with `{ active: true, label? }` and must later balance that ownership
 with one `{ active: false }`. Label changes should clear and reacquire the count.
 The existing `herdr:blocked` overlay retains higher precedence.
+
+The interactive tool named `ask` is a special case because it waits for Operator
+input without publishing a Herdr event. Classify it from Pi's documented
+`tool_execution_start` and `tool_execution_end` lifecycle events inside the
+Herdr adapter rather than adding Herdr-specific behavior to the Ask extension.
+Track active calls by `toolCallId`, not a counter, so duplicate completion events
+and concurrent questions cannot clear blocked state early. Keep the displayed
+message generic (`Awaiting answer`) rather than coupling to Ask's argument
+schema. This is a behavioral convention on the stable tool name, not a source or
+package dependency.
 
 ### Patch provenance
 
@@ -174,7 +187,8 @@ session. Keep these three artifacts distinct:
 
 The running Herdr server may remain the normal upstream release because this
 patch does not change the socket protocol. Only the installer must come from the
-fork so it writes the version 9 Pi asset containing the `herdr:busy` listener.
+fork so it writes the version 9 Pi asset containing the `herdr:busy` listener
+and Ask lifecycle tracking.
 Build the fork from `/home/linkdevk/repos/herdr/master`. On this workstation,
 install the resulting standalone executable to `~/.local/bin/herdr`, then use
 that installed fork binary to refresh and inspect the managed Pi extension:
@@ -191,7 +205,7 @@ Confirm the deployed asset rather than assuming that a fork checkout or build is
 active:
 
 ```bash
-rg 'HERDR_INTEGRATION_VERSION=9|herdr:busy' \
+rg 'HERDR_INTEGRATION_VERSION=9|herdr:busy|tool_execution_start' \
   ~/.pi/agent/extensions/herdr-agent-state.ts
 ```
 
@@ -220,4 +234,5 @@ running Pi extension runtime, so prepare all changes before one restart:
 The Herdr fork remains the sole socket lifecycle authority. Pi extensions may
 publish the generic counted `herdr:busy` sibling event but must not ship copied
 lifecycle-authority implementations. No Pi extension is a source dependency of
-this fork patch.
+this fork patch; Ask support relies only on Pi's public tool lifecycle and the
+registered tool name.

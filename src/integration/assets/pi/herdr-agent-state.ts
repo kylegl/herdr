@@ -180,6 +180,7 @@ export default function (pi) {
   let agentActive = false;
   let blockedCount = 0;
   let blockedMessage: string | undefined;
+  const blockingToolCalls = new Set<string>();
   let busyCount = 0;
   let busyMessage: string | undefined;
   let lastState: AgentState | undefined;
@@ -187,8 +188,11 @@ export default function (pi) {
   let rootSession = false;
 
   function desiredState() {
-    if (blockedCount > 0) {
-      return { state: "blocked" as const, message: blockedMessage };
+    if (blockedCount > 0 || blockingToolCalls.size > 0) {
+      return {
+        state: "blocked" as const,
+        message: blockedCount > 0 ? blockedMessage : "Awaiting answer",
+      };
     }
     if (agentActive) {
       return { state: "working" as const, message: undefined };
@@ -242,6 +246,27 @@ export default function (pi) {
 
     blockedCount += 1;
     blockedMessage = data.label;
+    publishState();
+  });
+
+  // The third-party `ask` tool waits on Pi's interactive UI but does not know
+  // about Herdr's optional event bus. Track Pi's native tool lifecycle here so
+  // Ask remains decoupled from this integration.
+  pi.on("tool_execution_start", (event) => {
+    if (!rootSession || event?.toolName !== "ask" || typeof event.toolCallId !== "string") {
+      return;
+    }
+
+    blockingToolCalls.add(event.toolCallId);
+    publishState();
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    if (!rootSession || event?.toolName !== "ask" || typeof event.toolCallId !== "string") {
+      return;
+    }
+
+    blockingToolCalls.delete(event.toolCallId);
     publishState();
   });
 
