@@ -320,6 +320,38 @@ test("Pi blocked state takes precedence over the busy overlay", async () => {
   expect(requestStates(requests)).toEqual(["idle", "working", "blocked", "idle"]);
 });
 
+test("Pi ask tools report blocked until every ask call finishes", async () => {
+  const requests = await startRecordingServer("pi-ask-blocked");
+  const { handlers, pi } = createExtensionHarness();
+  const { default: install } = await importFresh("./pi/herdr-agent-state.ts");
+  install(pi);
+
+  const context = piContext(() => true);
+  await handlers.get("session_start")?.({ reason: "startup" }, context);
+  await waitFor(() => requestStates(requests).length === 1);
+  handlers.get("agent_start")?.({}, context);
+  await waitFor(() => requestStates(requests).length === 2);
+
+  const executionStart = handlers.get("tool_execution_start");
+  const executionEnd = handlers.get("tool_execution_end");
+  expect(executionStart).toBeDefined();
+  expect(executionEnd).toBeDefined();
+
+  executionStart?.({ toolCallId: "ask-1", toolName: "ask", args: {} }, context);
+  await waitFor(() => requestStates(requests).length === 3);
+  expect(requestStates(requests)).toEqual(["idle", "working", "blocked"]);
+  expect(requestMessage(requests.at(-1))).toBe("Awaiting answer");
+
+  executionStart?.({ toolCallId: "ask-2", toolName: "ask", args: {} }, context);
+  executionEnd?.({ toolCallId: "ask-1", toolName: "ask" }, context);
+  await Bun.sleep(25);
+  expect(requestStates(requests)).toEqual(["idle", "working", "blocked"]);
+
+  executionEnd?.({ toolCallId: "ask-2", toolName: "ask" }, context);
+  await waitFor(() => requestStates(requests).length === 4);
+  expect(requestStates(requests)).toEqual(["idle", "working", "blocked", "working"]);
+});
+
 test("Pi ignores RPC sessions even when UI APIs are available", async () => {
   const requests = await startRecordingServer("pi-rpc");
   const { handlers, pi } = createExtensionHarness();
