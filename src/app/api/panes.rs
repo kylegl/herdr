@@ -620,7 +620,11 @@ impl App {
             destination,
             focus,
         } = params;
-        let Some((source_ws_idx, source_pane_id)) = self.parse_pane_id(&pane_id) else {
+        let Some((_, source_pane_id)) = self.parse_pane_id(&pane_id) else {
+            return encode_error(id, "pane_not_found", "source pane not found");
+        };
+        self.state.prepare_attention_pane_move(source_pane_id);
+        let Some((source_ws_idx, _)) = self.find_pane(source_pane_id) else {
             return encode_error(id, "pane_not_found", "source pane not found");
         };
         let Some(source_tab_idx) =
@@ -1032,6 +1036,7 @@ impl App {
             self.emit_layout_updated_snapshot(source_layout);
         }
         self.emit_layout_updated_snapshot((*move_result.target_layout).clone());
+        self.state.reconcile_attention_dock();
 
         encode_success(id, ResponseResult::PaneMove { move_result })
     }
@@ -1521,7 +1526,11 @@ impl App {
 
     /// Close a pane; `Err` carries the encoded error response.
     pub(super) fn close_pane(&mut self, id: String, target: &PaneTarget) -> Result<(), String> {
-        let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+        let Some((_, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+            return Err(pane_not_found(id, &target.pane_id));
+        };
+        self.state.prepare_attention_topology_mutation();
+        let Some((ws_idx, _)) = self.find_pane(pane_id) else {
             return Err(pane_not_found(id, &target.pane_id));
         };
         let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
@@ -1532,12 +1541,14 @@ impl App {
         if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
             && self.state.confirm_implicit_worktree_group_close(ws_idx)
         {
+            self.state.reconcile_attention_dock();
             return Err(encode_error(
                 id,
                 "confirmation_required",
                 "closing this pane would close a worktree group",
             ));
         }
+        self.state.prepare_attention_pane_mutation(pane_id);
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
         let should_close_workspace = {
@@ -1580,6 +1591,7 @@ impl App {
                 self.emit_layout_updated_event(ws_idx, tab_idx);
             }
         }
+        self.state.reconcile_attention_dock();
 
         Ok(())
     }

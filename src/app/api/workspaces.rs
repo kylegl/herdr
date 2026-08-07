@@ -302,6 +302,7 @@ impl App {
         if self.state.workspaces.get(index).is_none() {
             return workspace_not_found(id, &target.workspace_id);
         }
+        self.state.prepare_attention_topology_mutation();
         let workspace_id = self.public_workspace_id(index);
         let workspace = self.workspace_info(index);
         let pane_ids = self

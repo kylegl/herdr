@@ -39,6 +39,38 @@ impl App {
         })
     }
 
+    pub(crate) fn handle_attention_dock_set(
+        &mut self,
+        id: String,
+        target: crate::api::schema::PaneTarget,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+            return responses::encode_error(
+                id,
+                "pane_not_found",
+                format!("pane {} not found", target.pane_id),
+            );
+        };
+        self.state.set_attention_dock(ws_idx, pane_id);
+        responses::encode_success(id, crate::api::schema::ResponseResult::Ok {})
+    }
+
+    pub(crate) fn handle_attention_dock_clear(
+        &mut self,
+        id: String,
+        target: crate::api::schema::WorkspaceTarget,
+    ) -> String {
+        let Some(ws_idx) = self.parse_workspace_id(&target.workspace_id) else {
+            return responses::encode_error(
+                id,
+                "workspace_not_found",
+                format!("workspace {} not found", target.workspace_id),
+            );
+        };
+        self.state.clear_attention_dock(ws_idx);
+        responses::encode_success(id, crate::api::schema::ResponseResult::Ok {})
+    }
+
     pub(crate) fn dispatch_deferred_api_request(
         &mut self,
         id: &'static str,
@@ -299,6 +331,7 @@ impl App {
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
             self.emit_pane_state_update(update);
         }
+        self.state.reconcile_attention_dock();
         self.sync_agent_metadata_deadline();
         if let Some((
             overlay,
@@ -974,6 +1007,12 @@ impl App {
                 );
             }
             Method::SessionSnapshot(_) => return self.handle_session_snapshot(request.id),
+            Method::AttentionDockSet(target) => {
+                return self.handle_attention_dock_set(request.id, target);
+            }
+            Method::AttentionDockClear(target) => {
+                return self.handle_attention_dock_clear(request.id, target);
+            }
             Method::WorkspaceList(_) => return self.handle_workspace_list(request.id),
             Method::WorkspaceGet(target) => return self.handle_workspace_get(request.id, target),
             Method::WorkspaceCreate(params) => {

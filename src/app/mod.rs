@@ -10,6 +10,7 @@ pub(crate) mod agent_view;
 mod agents;
 mod api;
 mod api_helpers;
+pub(crate) mod attention_dock;
 pub(crate) use api_helpers::limit_snapshot_lines;
 mod config_io;
 mod creation;
@@ -521,6 +522,7 @@ impl App {
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
+            attention_dock: attention_dock::AttentionDockState::default(),
             workspaces,
             active,
             previous_pane_focus: None,

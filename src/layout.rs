@@ -271,6 +271,25 @@ impl TileLayout {
         true
     }
 
+    /// Replace one pane id while preserving its layout cell and focus history.
+    pub(crate) fn replace_pane_id(&mut self, current: PaneId, replacement: PaneId) -> bool {
+        if current == replacement {
+            return false;
+        }
+        let ids = self.pane_ids();
+        if !ids.contains(&current) || ids.contains(&replacement) {
+            return false;
+        }
+        replace_pane_id(&mut self.root, current, replacement);
+        if self.focus == current {
+            self.focus = replacement;
+        }
+        if self.prev_focus == Some(current) {
+            self.prev_focus = Some(replacement);
+        }
+        true
+    }
+
     /// Set the ratio of a split node at the given path.
     pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
         set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9))
@@ -583,6 +602,17 @@ fn swap_pane_ids(node: &mut Node, first: PaneId, second: PaneId) {
         } => {
             swap_pane_ids(first_child, first, second);
             swap_pane_ids(second_child, first, second);
+        }
+    }
+}
+
+fn replace_pane_id(node: &mut Node, current: PaneId, replacement: PaneId) {
+    match node {
+        Node::Pane(id) if *id == current => *id = replacement,
+        Node::Pane(_) => {}
+        Node::Split { first, second, .. } => {
+            replace_pane_id(first, current, replacement);
+            replace_pane_id(second, current, replacement);
         }
     }
 }

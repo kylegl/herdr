@@ -261,8 +261,9 @@ pub fn capture(
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
+    attention_exchange: Option<crate::app::attention_dock::CanonicalAttentionExchange>,
 ) -> SessionSnapshot {
-    SessionSnapshot {
+    let mut snapshot = SessionSnapshot {
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
             .iter()
@@ -273,7 +274,11 @@ pub fn capture(
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
+    };
+    if let Some(exchange) = attention_exchange {
+        canonicalize_attention_snapshot(&mut snapshot, &exchange);
     }
+    snapshot
 }
 
 fn capture_workspace(
@@ -385,8 +390,9 @@ fn capture_tab(
 pub fn capture_history(
     workspaces: &[Workspace],
     terminal_runtimes: &TerminalRuntimeRegistry,
+    attention_exchange: Option<crate::app::attention_dock::CanonicalAttentionExchange>,
 ) -> SessionHistorySnapshot {
-    SessionHistorySnapshot {
+    let mut snapshot = SessionHistorySnapshot {
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
             .iter()
@@ -400,6 +406,179 @@ pub fn capture_history(
                     .collect(),
             })
             .collect(),
+    };
+    if let Some(exchange) = attention_exchange {
+        canonicalize_attention_history(&mut snapshot, &exchange);
+    }
+    snapshot
+}
+
+fn canonicalize_attention_snapshot(
+    snapshot: &mut SessionSnapshot,
+    exchange: &crate::app::attention_dock::CanonicalAttentionExchange,
+) {
+    let attention_id = exchange.attention_pane.raw();
+    let displaced_id = exchange.displaced_pane.raw();
+    let Some(attention_location) = snapshot_pane_location(&snapshot.workspaces, attention_id)
+    else {
+        return;
+    };
+    let Some(displaced_location) = snapshot_pane_location(&snapshot.workspaces, displaced_id)
+    else {
+        return;
+    };
+    if attention_location == displaced_location {
+        swap_layout_snapshot_ids(
+            &mut snapshot.workspaces[attention_location.0].tabs[attention_location.1].layout,
+            attention_id,
+            displaced_id,
+        );
+        return;
+    }
+
+    let attention_pane = snapshot.workspaces[attention_location.0].tabs[attention_location.1]
+        .panes
+        .remove(&attention_id);
+    let displaced_pane = snapshot.workspaces[displaced_location.0].tabs[displaced_location.1]
+        .panes
+        .remove(&displaced_id);
+    let (Some(attention_pane), Some(displaced_pane)) = (attention_pane, displaced_pane) else {
+        return;
+    };
+
+    canonicalize_tab_slot(
+        &mut snapshot.workspaces[attention_location.0].tabs[attention_location.1],
+        attention_id,
+        displaced_id,
+    );
+    canonicalize_tab_slot(
+        &mut snapshot.workspaces[displaced_location.0].tabs[displaced_location.1],
+        displaced_id,
+        attention_id,
+    );
+    snapshot.workspaces[attention_location.0].tabs[attention_location.1]
+        .panes
+        .insert(displaced_id, displaced_pane);
+    snapshot.workspaces[displaced_location.0].tabs[displaced_location.1]
+        .panes
+        .insert(attention_id, attention_pane);
+
+    if attention_location.0 != displaced_location.0 {
+        if let (Some(attention_home_number), Some(displaced_home_number)) = (
+            exchange.attention_home_number,
+            exchange.displaced_home_number,
+        ) {
+            snapshot.workspaces[attention_location.0]
+                .public_pane_numbers
+                .remove(&attention_id);
+            snapshot.workspaces[attention_location.0]
+                .public_pane_numbers
+                .insert(displaced_id, displaced_home_number);
+            snapshot.workspaces[displaced_location.0]
+                .public_pane_numbers
+                .remove(&displaced_id);
+            snapshot.workspaces[displaced_location.0]
+                .public_pane_numbers
+                .insert(attention_id, attention_home_number);
+        }
+    }
+}
+
+fn canonicalize_attention_history(
+    snapshot: &mut SessionHistorySnapshot,
+    exchange: &crate::app::attention_dock::CanonicalAttentionExchange,
+) {
+    let attention_id = exchange.attention_pane.raw();
+    let displaced_id = exchange.displaced_pane.raw();
+    let Some(attention_location) = history_pane_location(&snapshot.workspaces, attention_id) else {
+        return;
+    };
+    let Some(displaced_location) = history_pane_location(&snapshot.workspaces, displaced_id) else {
+        return;
+    };
+    if attention_location == displaced_location {
+        return;
+    }
+    let attention_history = snapshot.workspaces[attention_location.0].tabs[attention_location.1]
+        .panes
+        .remove(&attention_id);
+    let displaced_history = snapshot.workspaces[displaced_location.0].tabs[displaced_location.1]
+        .panes
+        .remove(&displaced_id);
+    if let Some(history) = attention_history {
+        snapshot.workspaces[displaced_location.0].tabs[displaced_location.1]
+            .panes
+            .insert(attention_id, history);
+    }
+    if let Some(history) = displaced_history {
+        snapshot.workspaces[attention_location.0].tabs[attention_location.1]
+            .panes
+            .insert(displaced_id, history);
+    }
+}
+
+fn snapshot_pane_location(
+    workspaces: &[WorkspaceSnapshot],
+    pane_id: u32,
+) -> Option<(usize, usize)> {
+    workspaces
+        .iter()
+        .enumerate()
+        .find_map(|(ws_idx, workspace)| {
+            workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.panes.contains_key(&pane_id))
+                .map(|tab_idx| (ws_idx, tab_idx))
+        })
+}
+
+fn history_pane_location(
+    workspaces: &[WorkspaceHistorySnapshot],
+    pane_id: u32,
+) -> Option<(usize, usize)> {
+    workspaces
+        .iter()
+        .enumerate()
+        .find_map(|(ws_idx, workspace)| {
+            workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.panes.contains_key(&pane_id))
+                .map(|tab_idx| (ws_idx, tab_idx))
+        })
+}
+
+fn canonicalize_tab_slot(tab: &mut TabSnapshot, current: u32, replacement: u32) {
+    replace_layout_snapshot_id(&mut tab.layout, current, replacement);
+    if tab.focused == Some(current) {
+        tab.focused = Some(replacement);
+    }
+    if tab.root_pane == Some(current) {
+        tab.root_pane = Some(replacement);
+    }
+}
+
+fn replace_layout_snapshot_id(layout: &mut LayoutSnapshot, current: u32, replacement: u32) {
+    match layout {
+        LayoutSnapshot::Pane(id) if *id == current => *id = replacement,
+        LayoutSnapshot::Pane(_) => {}
+        LayoutSnapshot::Split { first, second, .. } => {
+            replace_layout_snapshot_id(first, current, replacement);
+            replace_layout_snapshot_id(second, current, replacement);
+        }
+    }
+}
+
+fn swap_layout_snapshot_ids(layout: &mut LayoutSnapshot, first_id: u32, second_id: u32) {
+    match layout {
+        LayoutSnapshot::Pane(id) if *id == first_id => *id = second_id,
+        LayoutSnapshot::Pane(id) if *id == second_id => *id = first_id,
+        LayoutSnapshot::Pane(_) => {}
+        LayoutSnapshot::Split { first, second, .. } => {
+            swap_layout_snapshot_ids(first, first_id, second_id);
+            swap_layout_snapshot_ids(second, first_id, second_id);
+        }
     }
 }
 
@@ -541,6 +720,7 @@ mod tests {
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
+            state.canonical_attention_exchange(),
         )
     }
 
@@ -548,7 +728,11 @@ mod tests {
         state: &AppState,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> SessionHistorySnapshot {
-        capture_history(&state.workspaces, terminal_runtimes)
+        capture_history(
+            &state.workspaces,
+            terminal_runtimes,
+            state.canonical_attention_exchange(),
+        )
     }
 
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {

@@ -1133,6 +1133,7 @@ impl AppState {
             self.refresh_tab_bar_view();
             self.record_pane_focus_after_navigation(previous_focus);
             self.sync_selection_after_focus_navigation();
+            self.reconcile_attention_dock();
         }
     }
 
@@ -1168,6 +1169,7 @@ impl AppState {
         self.refresh_tab_bar_view();
         self.record_pane_focus_after_navigation(previous_focus);
         self.sync_selection_after_focus_navigation();
+        self.reconcile_attention_dock();
         true
     }
 
@@ -1671,6 +1673,7 @@ impl AppState {
         if self.workspaces.is_empty() {
             return;
         }
+        self.prepare_attention_topology_mutation();
         self.selection = None;
         self.selection_autoscroll = None;
         self.mark_session_dirty();
@@ -1735,6 +1738,7 @@ impl AppState {
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
         }
+        self.reconcile_attention_dock();
     }
 
     pub(crate) fn refresh_tab_bar_view(&mut self) {
@@ -2042,6 +2046,26 @@ impl AppState {
             }
         }
 
+        let intended_pane = active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .and_then(|workspace| workspace.focused_pane_id());
+        if let Some(pane_id) = intended_pane {
+            self.prepare_attention_pane_mutation(pane_id);
+            if let Some((ws_idx, tab_idx)) =
+                self.workspaces
+                    .iter()
+                    .enumerate()
+                    .find_map(|(ws_idx, workspace)| {
+                        workspace
+                            .find_tab_index_for_pane(pane_id)
+                            .map(|tab_idx| (ws_idx, tab_idx))
+                    })
+            {
+                self.switch_workspace_tab(ws_idx, tab_idx);
+                self.focus_pane_in_workspace(ws_idx, pane_id);
+            }
+        }
+        let active = self.active;
         self.selection = None;
         self.selection_autoscroll = None;
         self.mark_session_dirty();
@@ -2070,6 +2094,7 @@ impl AppState {
         } else {
             self.remove_unattached_terminal_ids(terminal_ids);
         }
+        self.reconcile_attention_dock();
         false
     }
 
@@ -2089,6 +2114,7 @@ impl AppState {
             }
         }
 
+        self.prepare_attention_topology_mutation();
         self.selection = None;
         self.selection_autoscroll = None;
         self.mark_session_dirty();
@@ -2127,6 +2153,7 @@ impl AppState {
             self.tab_scroll_follow_active = true;
             self.refresh_tab_bar_view();
         }
+        self.reconcile_attention_dock();
         false
     }
 }
@@ -3006,6 +3033,12 @@ impl AppState {
             agent_released,
             agent_release_status: agent_released.then(|| pane_agent_status(change.state, seen)),
         };
+        self.observe_attention_transition(
+            update.pane_id,
+            update.previous_state,
+            update.state,
+            update.seen,
+        );
         Some(update)
     }
 
@@ -3298,6 +3331,7 @@ impl AppState {
     }
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {
+        self.prepare_attention_pane_mutation(pane_id);
         self.pending_agent_notifications.remove(&pane_id);
         self.remove_plugin_pane_records([pane_id]);
         let ws_idx = self
@@ -3372,6 +3406,7 @@ impl AppState {
         } else {
             self.remove_unattached_terminal_ids(pane_terminal_id);
         }
+        self.reconcile_attention_dock();
     }
 }
 

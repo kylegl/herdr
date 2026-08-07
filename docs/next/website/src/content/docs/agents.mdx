@@ -94,6 +94,16 @@ A blocked agent makes its pane, tab, and workspace look blocked. A working agent
 
 This is the main Herdr workflow: start several agents, let them work in parallel, and use the sidebar to see which project needs a decision, which one is still running, and which one is ready to review.
 
+## Attention dock
+
+Reserve a pane in each workspace for agents that need attention. Right-click the pane and choose **Set as attention dock**. Herdr keeps one global queue: blocked agents come first, followed by agents that finished in the background, with first-in-first-out ordering inside each group.
+
+The queue head swaps into the active workspace's dock without changing the focused pane. When you switch workspaces, Herdr restores the agent to its original layout position and presents it in the new workspace's dock when that workspace has one in its active tab. A focused dock is left unchanged so Herdr never redirects your input.
+
+Focusing or viewing the docked agent does not remove it from the queue. It leaves only after it returns to `working`; then Herdr restores it home and presents the next entry. On the focused docked agent, `prefix+o` restores it to its original workspace, tab, and layout position, switches there, and focuses it. The agent remains queued until it starts working, so it can follow again after you leave.
+
+Right-click the dock and choose **Clear attention dock** to remove the designation. Dock designations and the attention queue belong to the live server session; a full server restart clears them. Session snapshots always save panes in their original layout positions rather than their temporary dock positions.
+
 ## Direct integrations
 
 Install the integration for each agent you use; it gives Herdr hook or plugin reports instead of screen detection alone:

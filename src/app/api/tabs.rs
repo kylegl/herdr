@@ -228,6 +228,7 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
             return tab_not_found(id, &target.tab_id);
         };
+        self.state.prepare_attention_topology_mutation();
         let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
             return tab_not_found(id, &target.tab_id);
         };
@@ -245,6 +246,7 @@ impl App {
 
         if closes_workspace {
             if self.state.confirm_implicit_worktree_group_close(ws_idx) {
+                self.state.reconcile_attention_dock();
                 return encode_error(
                     id,
                     "confirmation_required",
@@ -294,6 +296,7 @@ impl App {
                 workspace_id,
             },
         });
+        self.state.reconcile_attention_dock();
 
         encode_success(id, ResponseResult::Ok {})
     }

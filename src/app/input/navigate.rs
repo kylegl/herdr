@@ -482,7 +482,9 @@ impl App {
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::OpenNotificationTarget => {
-                self.focus_toast_target_via_api();
+                if !self.state.open_docked_attention() {
+                    self.focus_toast_target_via_api();
+                }
                 if self.state.mode == Mode::Navigate {
                     leave_navigate_mode(&mut self.state);
                 }
@@ -1901,7 +1903,9 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::OpenNotificationTarget => {
-            state.focus_toast_target();
+            if !state.open_docked_attention() {
+                state.focus_toast_target();
+            }
             if state.mode == Mode::Navigate {
                 leave_navigate_mode(state);
             }
@@ -2584,6 +2588,39 @@ mod tests {
         assert_eq!(state.workspaces[1].focused_pane_id(), Some(target_pane));
         assert!(state.toast.is_none());
         assert_eq!(state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn open_notification_binding_returns_focused_docked_agent_home() {
+        let mut app = app_with_test_workspaces(&["home", "work"]);
+        let attention_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let focused_pane = app.state.workspaces[1].tabs[0].root_pane;
+        let dock_pane = app.state.workspaces[1].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.workspaces[1].tabs[0]
+            .layout
+            .focus_pane(focused_pane);
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.set_attention_dock(1, dock_pane);
+        app.state.observe_attention_transition(
+            attention_pane,
+            crate::detect::AgentState::Working,
+            crate::detect::AgentState::Blocked,
+            true,
+        );
+        app.state.reconcile_attention_dock();
+        app.state.focus_pane_in_workspace(1, attention_pane);
+        app.state.mode = Mode::Prefix;
+
+        app.handle_prefix_key(TerminalKey::new(KeyCode::Char('o'), KeyModifiers::empty()));
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(attention_pane)
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
     }
 
     #[test]

@@ -49,9 +49,14 @@ impl App {
                 self.state.sidebar_width,
                 self.state.sidebar_section_split,
                 self.state.collapsed_space_keys.clone(),
+                self.state.canonical_attention_exchange(),
             );
             let history = self.persist_pane_history.then(|| {
-                crate::persist::capture_history(&self.state.workspaces, &self.terminal_runtimes)
+                crate::persist::capture_history(
+                    &self.state.workspaces,
+                    &self.terminal_runtimes,
+                    self.state.canonical_attention_exchange(),
+                )
             });
             SessionSaveJob::Save { snapshot, history }
         }
