@@ -433,6 +433,13 @@ impl App {
             }
         }
 
+        if matches!(
+            placement,
+            PluginPanePlacement::Split | PluginPanePlacement::Zoomed | PluginPanePlacement::Tab
+        ) {
+            self.state.prepare_attention_topology_mutation();
+        }
+
         match placement {
             PluginPanePlacement::Overlay => {
                 self.open_plugin_overlay_pane(id, params, &plugin, pane)
@@ -2436,6 +2443,41 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
         let context = app.current_plugin_context("selection-test");
 
         assert_eq!(context.selected_text.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn focused_attention_dock_targets_plugin_actions_at_the_source_public_pane() {
+        let mut app = test_app();
+        let home = crate::workspace::Workspace::test_new("voice-target");
+        let source_pane = home.tabs[0].root_pane;
+        let source_number = home.public_pane_numbers[&source_pane];
+        let source_workspace_id = home.id.clone();
+        let source_public_id = crate::workspace::public_pane_id_for_number(&home.id, source_number);
+        let work = crate::workspace::Workspace::test_new("work");
+        app.state.workspaces = vec![home, work];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.mode = crate::app::Mode::Terminal;
+        app.state.observe_attention_transition(
+            source_pane,
+            crate::detect::AgentState::Working,
+            crate::detect::AgentState::Blocked,
+            true,
+        );
+        app.state.reconcile_attention_dock();
+        app.state.focus_pane_in_workspace(1, source_pane);
+
+        let context = app.current_plugin_context("voice-action");
+
+        assert_eq!(
+            context.focused_pane_id.as_deref(),
+            Some(source_public_id.as_str())
+        );
+        assert_eq!(
+            context.workspace_id.as_deref(),
+            Some(source_workspace_id.as_str())
+        );
     }
 
     #[cfg(unix)]

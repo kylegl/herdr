@@ -1228,7 +1228,6 @@ pub enum ContextMenuKind {
         pane_id: PaneId,
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
-        is_attention_dock: bool,
     },
 }
 
@@ -1281,7 +1280,6 @@ impl ContextMenuState {
             ContextMenuKind::Pane {
                 has_manual_label,
                 source_pane_id,
-                is_attention_dock,
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
@@ -1291,11 +1289,6 @@ impl ContextMenuState {
                 if source_pane_id.is_some() {
                     items.push("Swap with focused pane");
                 }
-                items.push(if is_attention_dock {
-                    "Clear attention dock"
-                } else {
-                    "Set as attention dock"
-                });
                 items.extend(["Split right", "Split down", "Zoom", "Close pane"]);
                 items
             }

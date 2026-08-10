@@ -2595,14 +2595,12 @@ mod tests {
         let mut app = app_with_test_workspaces(&["home", "work"]);
         let attention_pane = app.state.workspaces[0].tabs[0].root_pane;
         let focused_pane = app.state.workspaces[1].tabs[0].root_pane;
-        let dock_pane = app.state.workspaces[1].test_split(Direction::Horizontal);
         app.state.ensure_test_terminals();
         app.state.workspaces[1].tabs[0]
             .layout
             .focus_pane(focused_pane);
         app.state.active = Some(1);
         app.state.selected = 1;
-        app.state.set_attention_dock(1, dock_pane);
         app.state.observe_attention_transition(
             attention_pane,
             crate::detect::AgentState::Working,

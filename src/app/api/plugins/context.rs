@@ -33,6 +33,29 @@ impl App {
         let Some(ws_idx) = self.state.active else {
             return empty_plugin_context(correlation_id);
         };
+        if let Some((home_ws_idx, home_tab_idx, pane_id, source_public_pane_id)) =
+            self.state.focused_attention_source_context()
+        {
+            let workspace = self.workspace_info(home_ws_idx);
+            let tab_id = self.public_tab_id(home_ws_idx, home_tab_idx);
+            let tab_label = self.state.workspaces[home_ws_idx].tab_display_name(home_tab_idx);
+            let mut focused_pane = self.pane_info(ws_idx, pane_id);
+            if let Some(pane) = &mut focused_pane {
+                pane.pane_id = source_public_pane_id;
+                pane.workspace_id = workspace.workspace_id.clone();
+                if let Some(tab_id) = &tab_id {
+                    pane.tab_id = tab_id.clone();
+                }
+            }
+            return self.plugin_context_from_parts(
+                home_ws_idx,
+                workspace,
+                tab_id,
+                tab_label,
+                focused_pane,
+                correlation_id,
+            );
+        }
         self.plugin_context_for_workspace(ws_idx, correlation_id)
     }
 

@@ -433,6 +433,7 @@ fn canonicalize_attention_snapshot(
             attention_id,
             displaced_id,
         );
+        remove_transient_attention_pane(snapshot, exchange);
         return;
     }
 
@@ -482,6 +483,77 @@ fn canonicalize_attention_snapshot(
                 .insert(attention_id, attention_home_number);
         }
     }
+    remove_transient_attention_pane(snapshot, exchange);
+}
+
+fn remove_transient_attention_pane(
+    snapshot: &mut SessionSnapshot,
+    exchange: &crate::app::attention_dock::CanonicalAttentionExchange,
+) {
+    let Some(transient_pane) = exchange.transient_pane else {
+        return;
+    };
+    let transient_id = transient_pane.raw();
+    if let Some(next_public_pane_number) = exchange.attention_home_next_public_pane_number {
+        for workspace in &mut snapshot.workspaces {
+            if workspace
+                .tabs
+                .iter()
+                .any(|tab| tab.panes.contains_key(&exchange.attention_pane.raw()))
+            {
+                workspace.next_public_pane_number = next_public_pane_number;
+                break;
+            }
+        }
+    }
+    for workspace in &mut snapshot.workspaces {
+        workspace.public_pane_numbers.remove(&transient_id);
+        for tab in &mut workspace.tabs {
+            if !tab.panes.contains_key(&transient_id) {
+                continue;
+            }
+            tab.panes.remove(&transient_id);
+            if let Some(next_public_pane_number) = exchange.transient_home_next_public_pane_number {
+                workspace.next_public_pane_number = next_public_pane_number;
+            }
+            let old = std::mem::replace(&mut tab.layout, LayoutSnapshot::Pane(transient_id));
+            if let Some(layout) = remove_layout_snapshot_pane(old, transient_id) {
+                tab.layout = layout;
+            }
+            if tab.focused == Some(transient_id) {
+                tab.focused = first_pane_id_in_layout(&tab.layout);
+            }
+            if tab.root_pane == Some(transient_id) {
+                tab.root_pane = first_pane_id_in_layout(&tab.layout);
+            }
+            return;
+        }
+    }
+}
+
+fn remove_layout_snapshot_pane(layout: LayoutSnapshot, target: u32) -> Option<LayoutSnapshot> {
+    match layout {
+        LayoutSnapshot::Pane(id) if id == target => None,
+        LayoutSnapshot::Pane(id) => Some(LayoutSnapshot::Pane(id)),
+        LayoutSnapshot::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => match (
+            remove_layout_snapshot_pane(*first, target),
+            remove_layout_snapshot_pane(*second, target),
+        ) {
+            (Some(first), Some(second)) => Some(LayoutSnapshot::Split {
+                direction,
+                ratio,
+                first: Box::new(first),
+                second: Box::new(second),
+            }),
+            (Some(child), None) | (None, Some(child)) => Some(child),
+            (None, None) => None,
+        },
+    }
 }
 
 fn canonicalize_attention_history(
@@ -493,10 +565,34 @@ fn canonicalize_attention_history(
     let Some(attention_location) = history_pane_location(&snapshot.workspaces, attention_id) else {
         return;
     };
+    if exchange.transient_pane.is_some() {
+        let Some(home_ws_idx) = exchange.attention_home_ws_idx else {
+            return;
+        };
+        let Some(home_tab_idx) = exchange.attention_home_tab_idx else {
+            return;
+        };
+        let attention_history = snapshot.workspaces[attention_location.0].tabs
+            [attention_location.1]
+            .panes
+            .remove(&attention_id);
+        if let (Some(home_tab), Some(history)) = (
+            snapshot
+                .workspaces
+                .get_mut(home_ws_idx)
+                .and_then(|workspace| workspace.tabs.get_mut(home_tab_idx)),
+            attention_history,
+        ) {
+            home_tab.panes.insert(attention_id, history);
+        }
+        remove_transient_attention_history(snapshot, exchange);
+        return;
+    }
     let Some(displaced_location) = history_pane_location(&snapshot.workspaces, displaced_id) else {
         return;
     };
     if attention_location == displaced_location {
+        remove_transient_attention_history(snapshot, exchange);
         return;
     }
     let attention_history = snapshot.workspaces[attention_location.0].tabs[attention_location.1]
@@ -514,6 +610,21 @@ fn canonicalize_attention_history(
         snapshot.workspaces[attention_location.0].tabs[attention_location.1]
             .panes
             .insert(displaced_id, history);
+    }
+    remove_transient_attention_history(snapshot, exchange);
+}
+
+fn remove_transient_attention_history(
+    snapshot: &mut SessionHistorySnapshot,
+    exchange: &crate::app::attention_dock::CanonicalAttentionExchange,
+) {
+    let Some(transient_pane) = exchange.transient_pane else {
+        return;
+    };
+    for workspace in &mut snapshot.workspaces {
+        for tab in &mut workspace.tabs {
+            tab.panes.remove(&transient_pane.raw());
+        }
     }
 }
 

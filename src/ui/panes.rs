@@ -624,11 +624,13 @@ fn render_pane_border_titles(
         if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
             continue;
         }
-        let Some(title) = ws
-            .pane_state(info.id)
-            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
-            .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
+        let label = app.attention_dock_title_for_pane(info.id).or_else(|| {
+            ws.pane_state(info.id)
+                .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+                .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
+        });
+        let Some(title) =
+            label.and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
         else {
             continue;
         };

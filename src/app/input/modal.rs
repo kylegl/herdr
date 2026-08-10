@@ -868,20 +868,6 @@ pub(super) fn apply_context_menu_action(
         }
         (
             ContextMenuKind::Pane {
-                ws_idx, pane_id, ..
-            },
-            Some("Set as attention dock"),
-        ) => {
-            state.set_attention_dock(ws_idx, pane_id);
-            state.mode = Mode::Terminal;
-            state.reconcile_attention_dock();
-        }
-        (ContextMenuKind::Pane { ws_idx, .. }, Some("Clear attention dock")) => {
-            state.clear_attention_dock(ws_idx);
-            state.mode = Mode::Terminal;
-        }
-        (
-            ContextMenuKind::Pane {
                 ws_idx,
                 tab_idx,
                 pane_id,
@@ -1299,36 +1285,6 @@ impl App {
                             pane_id,
                             label: None,
                         },
-                    );
-                }
-                self.state.mode = Mode::Terminal;
-            }
-            (
-                ContextMenuKind::Pane {
-                    ws_idx, pane_id, ..
-                },
-                Some("Set as attention dock"),
-            ) => {
-                if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                    self.dispatch_api_request(
-                        "tui.attention_dock.set",
-                        crate::api::schema::Method::AttentionDockSet(
-                            crate::api::schema::PaneTarget { pane_id },
-                        ),
-                    );
-                }
-                self.state.mode = Mode::Terminal;
-                self.state.reconcile_attention_dock();
-            }
-            (ContextMenuKind::Pane { ws_idx, .. }, Some("Clear attention dock")) => {
-                if let Some(workspace) = self.state.workspaces.get(ws_idx) {
-                    self.dispatch_api_request(
-                        "tui.attention_dock.clear",
-                        crate::api::schema::Method::AttentionDockClear(
-                            crate::api::schema::WorkspaceTarget {
-                                workspace_id: workspace.id.clone(),
-                            },
-                        ),
                     );
                 }
                 self.state.mode = Mode::Terminal;
@@ -2227,56 +2183,6 @@ mod tests {
     }
 
     #[test]
-    fn pane_context_menu_sets_and_clears_attention_dock() {
-        let mut state = state_with_workspaces(&["work"]);
-        let pane_id = state.workspaces[0].tabs[0].root_pane;
-        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let set_menu = ContextMenuState {
-            kind: ContextMenuKind::Pane {
-                ws_idx: 0,
-                tab_idx: 0,
-                pane_id,
-                source_pane_id: None,
-                has_manual_label: false,
-                is_attention_dock: false,
-            },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
-        let set_idx = set_menu
-            .items()
-            .iter()
-            .position(|item| *item == "Set as attention dock")
-            .expect("set attention dock item");
-
-        apply_context_menu_action(&mut state, &mut terminal_runtimes, set_menu, set_idx);
-        assert!(state.is_attention_dock(0, pane_id));
-
-        let clear_menu = ContextMenuState {
-            kind: ContextMenuKind::Pane {
-                ws_idx: 0,
-                tab_idx: 0,
-                pane_id,
-                source_pane_id: None,
-                has_manual_label: false,
-                is_attention_dock: true,
-            },
-            x: 0,
-            y: 0,
-            list: MenuListState::new(0),
-        };
-        let clear_idx = clear_menu
-            .items()
-            .iter()
-            .position(|item| *item == "Clear attention dock")
-            .expect("clear attention dock item");
-
-        apply_context_menu_action(&mut state, &mut terminal_runtimes, clear_menu, clear_idx);
-        assert!(!state.is_attention_dock(0, pane_id));
-    }
-
-    #[test]
     fn context_menu_close_pane_last_parent_group_pane_keeps_confirmation_mode() {
         let mut state = state_with_workspaces(&["main", "issue"]);
         state.active = Some(0);
@@ -2303,7 +2209,6 @@ mod tests {
                 pane_id,
                 source_pane_id: None,
                 has_manual_label: false,
-                is_attention_dock: false,
             },
             x: 0,
             y: 0,
@@ -2369,7 +2274,6 @@ mod tests {
                 pane_id,
                 source_pane_id: None,
                 has_manual_label: false,
-                is_attention_dock: false,
             },
             x: 0,
             y: 0,

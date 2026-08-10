@@ -3327,6 +3327,7 @@ impl AppState {
             deliveries.push(delivery);
         }
 
+        self.reconcile_attention_dock();
         deliveries
     }
 

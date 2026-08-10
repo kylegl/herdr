@@ -2127,15 +2127,7 @@ impl HeadlessServer {
                 // not raw fallback reports that may be masked by hook authority.
                 let prev_state = self.pane_effective_state(pane_id_val);
                 let prev_agent_label = self.pane_effective_agent_label(pane_id_val);
-
-                // Handle the state change (updates pane state, sets toast on AppState).
-                // Headless mode disables local sound playback separately from the
-                // sound policy so reloads can keep server-side notification policy live.
-                self.sync_foreground_client_state();
-                self.app.handle_internal_event(ev);
-
-                // Forward sound notification to clients when server-side sound policy allows it.
-                let is_active_tab = self
+                let mut is_active_tab = self
                     .app
                     .state
                     .active
@@ -2144,6 +2136,21 @@ impl HeadlessServer {
                         ws.find_tab_index_for_pane(pane_id_val)
                             .is_some_and(|tab_idx| ws.active_tab_index() == tab_idx)
                     });
+
+                // Handle the state change (updates pane state, sets toast on AppState).
+                // Headless mode disables local sound playback separately from the
+                // sound policy so reloads can keep server-side notification policy live.
+                self.sync_foreground_client_state();
+                self.app.handle_internal_event(ev);
+                if let Some(home_is_active) =
+                    self.app.state.attention_home_is_active_tab(pane_id_val)
+                {
+                    is_active_tab = home_is_active;
+                }
+
+                // Use the pre-transition location: attention reconciliation may move a
+                // background pane into the active tab before notification forwarding.
+                // The transition still belongs to its original background context.
 
                 let suppress_active_tab_notifications =
                     self.active_tab_suppresses_notifications(is_active_tab);
@@ -2221,13 +2228,7 @@ impl HeadlessServer {
                 // produce a second notification path.
                 let prev_state = self.pane_effective_state(pane_id_val);
                 let prev_agent_label = self.pane_effective_agent_label(pane_id_val);
-
-                self.sync_foreground_client_state();
-                self.app.handle_internal_event(ev);
-
-                // Forward sound notification based on the effective transition when
-                // server-side sound policy allows it.
-                let is_active_tab = self
+                let mut is_active_tab = self
                     .app
                     .state
                     .active
@@ -2236,6 +2237,17 @@ impl HeadlessServer {
                         ws.find_tab_index_for_pane(pane_id_val)
                             .is_some_and(|tab_idx| ws.active_tab_index() == tab_idx)
                     });
+
+                self.sync_foreground_client_state();
+                self.app.handle_internal_event(ev);
+                if let Some(home_is_active) =
+                    self.app.state.attention_home_is_active_tab(pane_id_val)
+                {
+                    is_active_tab = home_is_active;
+                }
+
+                // Forward using the pane's location before attention reconciliation.
+                // A transient dock move must not suppress a background notification.
 
                 let suppress_active_tab_notifications =
                     self.active_tab_suppresses_notifications(is_active_tab);

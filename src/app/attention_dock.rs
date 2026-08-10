@@ -1,6 +1,11 @@
-use std::collections::HashMap;
-
-use crate::{app::state::AppState, detect::AgentState, layout::PaneId, workspace::Tab};
+use crate::{
+    app::state::AppState,
+    detect::AgentState,
+    layout::{Node, PaneId, TileLayout},
+    terminal::{TerminalId, TerminalState},
+    workspace::Tab,
+};
+use ratatui::layout::{Direction, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttentionKind {
@@ -21,6 +26,10 @@ struct CrossWorkspaceIdentity {
     displaced_home_number: usize,
     attention_home_public_id: String,
     displaced_home_public_id: String,
+    attention_home_legacy_id: String,
+    displaced_home_legacy_id: String,
+    attention_home_next_public_pane_number: usize,
+    displaced_home_next_public_pane_number: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,20 +38,32 @@ pub(crate) struct CanonicalAttentionExchange {
     pub(crate) displaced_pane: PaneId,
     pub(crate) attention_home_number: Option<usize>,
     pub(crate) displaced_home_number: Option<usize>,
+    pub(crate) transient_pane: Option<PaneId>,
+    pub(crate) transient_home_next_public_pane_number: Option<usize>,
+    pub(crate) attention_home_next_public_pane_number: Option<usize>,
+    pub(crate) attention_home_workspace_id: Option<String>,
+    pub(crate) attention_home_ws_idx: Option<usize>,
+    pub(crate) attention_home_tab_idx: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DockPlacement {
     attention_pane: PaneId,
     displaced_pane: PaneId,
+    transient_terminal: TerminalId,
+    attention_home_workspace_id: String,
+    attention_home_ws_idx: usize,
+    attention_home_tab_idx: usize,
     dock_workspace_id: String,
+    dock_tab_idx: usize,
+    dock_was_zoomed: bool,
+    dock_next_public_pane_number_before: usize,
     dock_focus_before_attention: PaneId,
     cross_workspace_identity: Option<CrossWorkspaceIdentity>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct AttentionDockState {
-    dock_panes: HashMap<String, PaneId>,
     queue: Vec<AttentionEntry>,
     placement: Option<DockPlacement>,
     presented_at_home: Option<PaneId>,
@@ -51,55 +72,6 @@ pub(crate) struct AttentionDockState {
 }
 
 impl AppState {
-    pub(crate) fn set_attention_dock(&mut self, ws_idx: usize, pane_id: PaneId) -> bool {
-        let Some(workspace) = self.workspaces.get(ws_idx) else {
-            return false;
-        };
-        if workspace.pane_state(pane_id).is_none() {
-            return false;
-        }
-        let workspace_id = workspace.id.clone();
-        if self
-            .attention_dock
-            .placement
-            .as_ref()
-            .is_some_and(|placement| placement.dock_workspace_id == workspace_id)
-        {
-            self.undock_attention();
-        }
-        self.attention_dock.dock_panes.insert(workspace_id, pane_id);
-        self.reconcile_attention_dock();
-        true
-    }
-
-    pub(crate) fn clear_attention_dock(&mut self, ws_idx: usize) -> bool {
-        let Some(workspace_id) = self
-            .workspaces
-            .get(ws_idx)
-            .map(|workspace| workspace.id.clone())
-        else {
-            return false;
-        };
-        if self
-            .attention_dock
-            .placement
-            .as_ref()
-            .is_some_and(|placement| placement.dock_workspace_id == workspace_id)
-        {
-            self.undock_attention();
-        }
-        self.attention_dock
-            .dock_panes
-            .remove(&workspace_id)
-            .is_some()
-    }
-
-    pub(crate) fn is_attention_dock(&self, ws_idx: usize, pane_id: PaneId) -> bool {
-        self.workspaces.get(ws_idx).is_some_and(|workspace| {
-            self.attention_dock.dock_panes.get(&workspace.id) == Some(&pane_id)
-        })
-    }
-
     pub(crate) fn observe_attention_transition(
         &mut self,
         pane_id: PaneId,
@@ -169,55 +141,110 @@ impl AppState {
             self.attention_dock.presented_at_home = None;
         }
 
+        if let Some(placement) = &self.attention_dock.placement {
+            let pinned = self.active.is_some_and(|ws_idx| {
+                ws_idx < self.workspaces.len()
+                    && self.workspaces[ws_idx].id == placement.dock_workspace_id
+                    && self.workspaces[ws_idx].active_tab_index() == placement.dock_tab_idx
+                    && self.workspaces[ws_idx].focused_pane_id() == Some(placement.attention_pane)
+            });
+            if pinned {
+                return;
+            }
+        }
+
         let desired = self.attention_head();
-        let active_workspace_id = self
-            .active
-            .and_then(|idx| self.workspaces.get(idx))
-            .map(|workspace| workspace.id.clone());
+        if desired.is_some_and(|pane_id| self.pending_agent_notifications.contains_key(&pane_id)) {
+            return;
+        }
+        let active_context = self.active.and_then(|ws_idx| {
+            self.workspaces
+                .get(ws_idx)
+                .map(|workspace| (ws_idx, workspace.id.clone(), workspace.active_tab_index()))
+        });
         let placement_matches = self
             .attention_dock
             .placement
             .as_ref()
             .is_some_and(|placement| {
-                Some(placement.attention_pane) == desired
-                    && Some(&placement.dock_workspace_id) == active_workspace_id.as_ref()
+                active_context
+                    .as_ref()
+                    .is_some_and(|(_, workspace_id, tab_idx)| {
+                        Some(placement.attention_pane) == desired
+                            && &placement.dock_workspace_id == workspace_id
+                            && placement.dock_tab_idx == *tab_idx
+                    })
             });
         if placement_matches {
             return;
         }
         self.undock_attention();
 
-        let (Some(attention_pane), Some(active_ws_idx)) = (desired, self.active) else {
+        let (Some(attention_pane), Some((active_ws_idx, dock_workspace_id, dock_tab_idx))) =
+            (desired, active_context)
+        else {
             return;
         };
-        let Some(workspace) = self.workspaces.get(active_ws_idx) else {
-            return;
-        };
-        let Some(&dock_pane) = self.attention_dock.dock_panes.get(&workspace.id) else {
-            return;
-        };
-        let Some(dock_tab_idx) = workspace.find_tab_index_for_pane(dock_pane) else {
-            return;
-        };
-        if dock_tab_idx != workspace.active_tab_index() || attention_pane == dock_pane {
+        if self.pane_location(attention_pane) == Some((active_ws_idx, dock_tab_idx)) {
+            self.mark_active_tab_seen();
             return;
         }
-        let focused = workspace.tabs[dock_tab_idx].layout.focused();
-        if focused == dock_pane || focused == attention_pane {
+        let Some((attention_home_ws_idx, attention_home_tab_idx)) =
+            self.pane_location(attention_pane)
+        else {
             return;
-        }
+        };
+        let attention_home_workspace_id = self.workspaces[attention_home_ws_idx].id.clone();
+        let (anchor, direction, focused, dock_was_zoomed, cwd) = {
+            let workspace = &self.workspaces[active_ws_idx];
+            let tab = &workspace.tabs[dock_tab_idx];
+            let Some((anchor, direction)) = automatic_dock_slot(&tab.layout) else {
+                return;
+            };
+            (
+                anchor,
+                direction,
+                tab.layout.focused(),
+                tab.zoomed,
+                workspace
+                    .resolved_identity_cwd_from(
+                        &self.terminals,
+                        &crate::terminal::TerminalRuntimeRegistry::new(),
+                    )
+                    .unwrap_or_default(),
+            )
+        };
+        let dock_next_public_pane_number_before =
+            self.workspaces[active_ws_idx].next_public_pane_number;
+        self.workspaces[active_ws_idx].tabs[dock_tab_idx].zoomed = false;
+        let Some((dock_pane, transient_terminal)) =
+            self.workspaces[active_ws_idx].insert_transient_pane(dock_tab_idx, anchor, direction)
+        else {
+            self.workspaces[active_ws_idx].tabs[dock_tab_idx].zoomed = dock_was_zoomed;
+            return;
+        };
+        self.terminals.insert(
+            transient_terminal.clone(),
+            TerminalState::new(transient_terminal.clone(), cwd),
+        );
 
-        let dock_workspace_id = workspace.id.clone();
         let Some(cross_workspace_identity) = self.dock_exchange(attention_pane, dock_pane) else {
+            let _ = self.workspaces[active_ws_idx].remove_transient_pane(dock_pane);
+            self.terminals.remove(&transient_terminal);
+            self.workspaces[active_ws_idx].tabs[dock_tab_idx].zoomed = dock_was_zoomed;
             return;
         };
-        self.attention_dock
-            .dock_panes
-            .insert(dock_workspace_id.clone(), attention_pane);
         self.attention_dock.placement = Some(DockPlacement {
             attention_pane,
             displaced_pane: dock_pane,
+            transient_terminal,
+            attention_home_workspace_id,
+            attention_home_ws_idx,
+            attention_home_tab_idx,
             dock_workspace_id,
+            dock_tab_idx,
+            dock_was_zoomed,
+            dock_next_public_pane_number_before,
             dock_focus_before_attention: focused,
             cross_workspace_identity,
         });
@@ -261,15 +288,69 @@ impl AppState {
         true
     }
 
+    pub(crate) fn attention_home_is_active_tab(&self, pane_id: PaneId) -> Option<bool> {
+        let placement = self.attention_dock.placement.as_ref()?;
+        if placement.attention_pane != pane_id {
+            return None;
+        }
+        Some(
+            self.active == Some(placement.attention_home_ws_idx)
+                && self.workspaces[placement.attention_home_ws_idx].active_tab_index()
+                    == placement.attention_home_tab_idx,
+        )
+    }
+
+    pub(crate) fn focused_attention_source_context(
+        &self,
+    ) -> Option<(usize, usize, PaneId, String)> {
+        let placement = self.attention_dock.placement.as_ref()?;
+        let active_ws_idx = self.active?;
+        if self.workspaces.get(active_ws_idx)?.focused_pane_id() != Some(placement.attention_pane) {
+            return None;
+        }
+        let home_ws_idx = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == placement.attention_home_workspace_id)?;
+        let public_pane_id = placement
+            .cross_workspace_identity
+            .as_ref()
+            .map(|identity| identity.attention_home_public_id.clone())
+            .or_else(|| {
+                let workspace = self.workspaces.get(home_ws_idx)?;
+                let number = workspace
+                    .public_pane_numbers
+                    .get(&placement.attention_pane)?;
+                Some(crate::workspace::public_pane_id_for_number(
+                    &workspace.id,
+                    *number,
+                ))
+            })?;
+        Some((
+            home_ws_idx,
+            placement.attention_home_tab_idx,
+            placement.attention_pane,
+            public_pane_id,
+        ))
+    }
+
+    pub(crate) fn attention_dock_title_for_pane(&self, pane_id: PaneId) -> Option<String> {
+        let placement = self.attention_dock.placement.as_ref()?;
+        if placement.attention_pane != pane_id {
+            return None;
+        }
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == placement.attention_home_workspace_id)
+            .map(|workspace| workspace.display_name_from_terminals(&self.terminals))
+    }
+
     pub(crate) fn prepare_attention_topology_mutation(&mut self) {
         self.undock_attention();
     }
 
-    pub(crate) fn prepare_attention_pane_move(&mut self, pane_id: PaneId) {
+    pub(crate) fn prepare_attention_pane_move(&mut self, _pane_id: PaneId) {
         self.undock_attention();
-        self.attention_dock
-            .dock_panes
-            .retain(|_, dock_pane| *dock_pane != pane_id);
     }
 
     pub(crate) fn prepare_attention_pane_mutation(&mut self, pane_id: PaneId) {
@@ -286,9 +367,6 @@ impl AppState {
         self.attention_dock
             .queue
             .retain(|entry| entry.pane_id != pane_id);
-        self.attention_dock
-            .dock_panes
-            .retain(|_, dock_pane| *dock_pane != pane_id);
         if self.attention_dock.presented_at_home == Some(pane_id) {
             self.attention_dock.presented_at_home = None;
         }
@@ -309,6 +387,17 @@ impl AppState {
                     .cross_workspace_identity
                     .as_ref()
                     .map(|identity| identity.displaced_home_number),
+                transient_pane: Some(placement.displaced_pane),
+                transient_home_next_public_pane_number: Some(
+                    placement.dock_next_public_pane_number_before,
+                ),
+                attention_home_next_public_pane_number: placement
+                    .cross_workspace_identity
+                    .as_ref()
+                    .map(|identity| identity.attention_home_next_public_pane_number),
+                attention_home_workspace_id: Some(placement.attention_home_workspace_id.clone()),
+                attention_home_ws_idx: Some(placement.attention_home_ws_idx),
+                attention_home_tab_idx: Some(placement.attention_home_tab_idx),
             })
     }
 
@@ -322,27 +411,11 @@ impl AppState {
                 "queued attention pane is not live"
             );
         }
-        for (workspace_id, pane_id) in &self.attention_dock.dock_panes {
-            let workspace = self
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.id == *workspace_id)
-                .expect("attention dock workspace must be live");
-            assert!(
-                workspace.pane_state(*pane_id).is_some(),
-                "attention dock pane must belong to its workspace"
-            );
-        }
         if let Some(placement) = &self.attention_dock.placement {
             assert_ne!(placement.attention_pane, placement.displaced_pane);
-            assert_eq!(
-                self.attention_dock
-                    .dock_panes
-                    .get(&placement.dock_workspace_id),
-                Some(&placement.attention_pane)
-            );
             assert!(self.pane_location(placement.attention_pane).is_some());
             assert!(self.pane_location(placement.displaced_pane).is_some());
+            assert!(self.terminals.contains_key(&placement.transient_terminal));
         }
     }
 
@@ -370,24 +443,35 @@ impl AppState {
         self.attention_dock
             .queue
             .retain(|entry| live_panes.contains(&entry.pane_id));
-        self.attention_dock
-            .dock_panes
-            .retain(|workspace_id, pane_id| {
-                self.workspaces.iter().any(|workspace| {
-                    workspace.id == *workspace_id && workspace.pane_state(*pane_id).is_some()
-                })
-            });
     }
 
     fn undock_attention(&mut self) {
         let Some(placement) = self.attention_dock.placement.take() else {
             return;
         };
-        if self.restore_dock_exchange(&placement) {
-            self.attention_dock
-                .dock_panes
-                .insert(placement.dock_workspace_id, placement.displaced_pane);
+        if !self.restore_dock_exchange(&placement) {
+            self.attention_dock.placement = Some(placement);
+            return;
         }
+        if let Some((ws_idx, _)) = self.pane_location(placement.displaced_pane) {
+            let removed_terminal =
+                self.workspaces[ws_idx].remove_transient_pane(placement.displaced_pane);
+            if let Some(terminal_id) = removed_terminal {
+                self.terminals.remove(&terminal_id);
+            }
+            self.workspaces[ws_idx].next_public_pane_number =
+                placement.dock_next_public_pane_number_before;
+            if self.workspaces[ws_idx]
+                .tabs
+                .get(placement.dock_tab_idx)
+                .is_some()
+            {
+                self.workspaces[ws_idx].tabs[placement.dock_tab_idx].zoomed =
+                    placement.dock_was_zoomed;
+            }
+        }
+        self.terminals.remove(&placement.transient_terminal);
+        self.refresh_location_bound_references();
     }
 
     fn pane_location(&self, pane_id: PaneId) -> Option<(usize, usize)> {
@@ -433,6 +517,14 @@ impl AppState {
                 displaced_home_number: dock_number,
                 attention_home_public_id: attention_public_id,
                 displaced_home_public_id: dock_public_id,
+                attention_home_legacy_id: format!(
+                    "p_{}_{}",
+                    attention_location.0 + 1,
+                    attention_pane.raw()
+                ),
+                displaced_home_legacy_id: format!("p_{}_{}", dock_location.0 + 1, dock_pane.raw()),
+                attention_home_next_public_pane_number: attention_workspace.next_public_pane_number,
+                displaced_home_next_public_pane_number: dock_workspace.next_public_pane_number,
             })
         } else {
             None
@@ -583,6 +675,10 @@ impl AppState {
             .insert(identity.attention_home_public_id.clone(), attention_pane);
         self.public_pane_id_aliases
             .insert(identity.displaced_home_public_id.clone(), dock_pane);
+        self.public_pane_id_aliases
+            .insert(identity.attention_home_legacy_id.clone(), attention_pane);
+        self.public_pane_id_aliases
+            .insert(identity.displaced_home_legacy_id.clone(), dock_pane);
     }
 
     fn restore_public_numbers(
@@ -606,10 +702,17 @@ impl AppState {
         dock_workspace
             .public_pane_numbers
             .insert(dock_pane, identity.displaced_home_number);
+        attention_workspace.next_public_pane_number =
+            identity.attention_home_next_public_pane_number;
+        dock_workspace.next_public_pane_number = identity.displaced_home_next_public_pane_number;
         self.public_pane_id_aliases
             .remove(&identity.attention_home_public_id);
         self.public_pane_id_aliases
             .remove(&identity.displaced_home_public_id);
+        self.public_pane_id_aliases
+            .remove(&identity.attention_home_legacy_id);
+        self.public_pane_id_aliases
+            .remove(&identity.displaced_home_legacy_id);
     }
 }
 
@@ -706,314 +809,276 @@ fn two_tabs_mut(tabs: &mut [Tab], first: usize, second: usize) -> (&mut Tab, &mu
     }
 }
 
+fn automatic_dock_slot(layout: &TileLayout) -> Option<(PaneId, Direction)> {
+    let pane_count = layout.pane_count();
+    let anchor = layout
+        .panes(Rect::new(0, 0, 10_000, 10_000))
+        .into_iter()
+        .max_by_key(|pane| {
+            (
+                pane.rect.y.saturating_add(pane.rect.height),
+                pane.rect.x.saturating_add(pane.rect.width),
+            )
+        })?
+        .id;
+    let direction = if pane_count == 2
+        && matches!(
+            layout.root(),
+            Node::Split {
+                direction: Direction::Horizontal,
+                ..
+            }
+        ) {
+        Direction::Vertical
+    } else {
+        Direction::Horizontal
+    };
+    Some((anchor, direction))
+}
+
 #[cfg(test)]
 mod tests {
-    use ratatui::layout::Direction;
+    use super::*;
+    use crate::{app::Mode, workspace::Workspace};
 
-    use crate::{
-        app::{state::AppState, Mode},
-        detect::AgentState,
-        workspace::Workspace,
-    };
-
-    fn app_with_dock() -> (AppState, crate::layout::PaneId, crate::layout::PaneId) {
-        let home = Workspace::test_new("home");
+    fn state_with_attention() -> (AppState, PaneId) {
+        let home = Workspace::test_new("attention-home");
         let attention_pane = home.tabs[0].root_pane;
-
-        let mut work = Workspace::test_new("work");
-        let focused_pane = work.tabs[0].root_pane;
-        let dock_pane = work.test_split(Direction::Horizontal);
-        work.tabs[0].layout.focus_pane(focused_pane);
-
+        let work = Workspace::test_new("work");
         let mut state = AppState::test_new();
         state.workspaces = vec![home, work];
         state.ensure_test_terminals();
         state.active = Some(1);
         state.selected = 1;
         state.mode = Mode::Terminal;
-        state.set_attention_dock(1, dock_pane);
-
-        (state, attention_pane, dock_pane)
-    }
-
-    #[test]
-    fn json_api_sets_and_clears_workspace_attention_dock() {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = crate::app::App::new(
-            &crate::config::Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
-        app.state.workspaces = vec![Workspace::test_new("work")];
-        app.state.ensure_test_terminals();
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let public_pane_id = crate::workspace::public_pane_id_for_number(
-            &app.state.workspaces[0].id,
-            app.state.workspaces[0]
-                .public_pane_number(pane_id)
-                .expect("pane number"),
-        );
-        let workspace_id = app.state.workspaces[0].id.clone();
-
-        app.dispatch_api_request(
-            "set",
-            crate::api::schema::Method::AttentionDockSet(crate::api::schema::PaneTarget {
-                pane_id: public_pane_id,
-            }),
-        );
-        assert!(app.state.is_attention_dock(0, pane_id));
-
-        app.dispatch_api_request(
-            "clear",
-            crate::api::schema::Method::AttentionDockClear(crate::api::schema::WorkspaceTarget {
-                workspace_id,
-            }),
-        );
-        assert!(!app.state.is_attention_dock(0, pane_id));
-    }
-
-    #[test]
-    fn rejected_pane_close_keeps_attention_entry_and_dock_designation() {
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = crate::app::App::new(
-            &crate::config::Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        );
-        let mut main = Workspace::test_new("main");
-        main.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
-            key: "repo".into(),
-            label: "repo".into(),
-            repo_root: "/repo".into(),
-            checkout_path: "/repo".into(),
-            is_linked_worktree: false,
-        });
-        let attention_pane = main.tabs[0].root_pane;
-        let mut issue = Workspace::test_new("issue");
-        issue.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
-            key: "repo".into(),
-            label: "repo".into(),
-            repo_root: "/repo".into(),
-            checkout_path: "/repo/issue".into(),
-            is_linked_worktree: true,
-        });
-        let focused_pane = issue.tabs[0].root_pane;
-        let dock_pane = issue.test_split(Direction::Horizontal);
-        issue.tabs[0].layout.focus_pane(focused_pane);
-        let public_attention_pane = crate::workspace::public_pane_id_for_number(
-            &main.id,
-            main.public_pane_number(attention_pane)
-                .expect("attention pane number"),
-        );
-        app.state.workspaces = vec![main, issue];
-        app.state.ensure_test_terminals();
-        app.state.active = Some(1);
-        app.state.selected = 1;
-        app.state.mode = Mode::Terminal;
-        app.state.set_attention_dock(1, dock_pane);
-        app.state.observe_attention_transition(
-            attention_pane,
-            AgentState::Working,
-            AgentState::Blocked,
-            true,
-        );
-        app.state.reconcile_attention_dock();
-
-        let response = app.dispatch_api_request(
-            "close",
-            crate::api::schema::Method::PaneClose(crate::api::schema::PaneTarget {
-                pane_id: public_attention_pane,
-            }),
-        );
-
-        assert!(response.contains("confirmation_required"));
-        assert!(app.state.workspaces[1].pane_state(attention_pane).is_some());
-        assert!(app.state.is_attention_dock(1, attention_pane));
-        app.state.assert_invariants_for_test();
-    }
-
-    #[test]
-    fn blocked_agent_is_presented_in_active_workspace_without_stealing_focus() {
-        let (mut state, attention_pane, dock_pane) = app_with_dock();
-        let focused_before = state.workspaces[1].tabs[0].layout.focused();
-
         state.observe_attention_transition(
             attention_pane,
             AgentState::Working,
             AgentState::Blocked,
             true,
         );
+        (state, attention_pane)
+    }
+
+    #[test]
+    fn attention_creates_a_transient_split_without_stealing_focus() {
+        let (mut state, attention_pane) = state_with_attention();
+        let focused = state.workspaces[1].focused_pane_id();
+
         state.reconcile_attention_dock();
 
-        assert!(state.workspaces[1].pane_state(attention_pane).is_some());
-        assert!(state.workspaces[0].pane_state(dock_pane).is_some());
-        assert_eq!(state.workspaces[1].tabs[0].layout.focused(), focused_before);
+        assert_eq!(state.workspaces[1].tabs[0].layout.pane_count(), 2);
+        assert_eq!(state.workspaces[1].focused_pane_id(), focused);
+        assert_eq!(state.pane_location(attention_pane), Some((1, 0)));
+        assert_eq!(
+            state
+                .attention_dock_title_for_pane(attention_pane)
+                .as_deref(),
+            Some("attention-home")
+        );
         state.assert_invariants_for_test();
     }
 
     #[test]
-    fn open_docked_attention_returns_home_focuses_and_follows_after_leaving() {
-        let (mut state, attention_pane, _) = app_with_dock();
+    fn zoomed_tabs_temporarily_unzoom_to_show_attention_and_restore_afterward() {
+        let (mut state, attention_pane) = state_with_attention();
+        state.workspaces[1].tabs[0].zoomed = true;
+
+        state.reconcile_attention_dock();
+
+        assert!(!state.workspaces[1].tabs[0].zoomed);
+        assert_eq!(state.pane_location(attention_pane), Some((1, 0)));
+
         state.observe_attention_transition(
             attention_pane,
+            AgentState::Blocked,
+            AgentState::Working,
+            true,
+        );
+        state.reconcile_attention_dock();
+        assert!(state.workspaces[1].tabs[0].zoomed);
+    }
+
+    #[test]
+    fn two_side_by_side_panes_place_attention_below_the_right_pane() {
+        let (mut state, attention_pane) = state_with_attention();
+        state.workspaces[1].test_split(Direction::Horizontal);
+
+        state.reconcile_attention_dock();
+
+        let attention_rect = state.workspaces[1].tabs[0]
+            .layout
+            .panes(Rect::new(0, 0, 120, 60))
+            .into_iter()
+            .find(|pane| pane.id == attention_pane)
+            .expect("attention pane")
+            .rect;
+        assert_eq!(attention_rect, Rect::new(60, 30, 60, 30));
+    }
+
+    #[test]
+    fn working_restores_the_original_layout_and_source_home() {
+        let (mut state, attention_pane) = state_with_attention();
+        let work_ids = state.workspaces[1].tabs[0].layout.pane_ids();
+        state.reconcile_attention_dock();
+
+        state.observe_attention_transition(
+            attention_pane,
+            AgentState::Blocked,
+            AgentState::Working,
+            true,
+        );
+        state.reconcile_attention_dock();
+
+        assert_eq!(state.workspaces[1].tabs[0].layout.pane_ids(), work_ids);
+        assert_eq!(state.pane_location(attention_pane), Some((0, 0)));
+        assert!(state.attention_dock.placement.is_none());
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn placement_uses_right_then_down_then_southeast_right() {
+        let one = Workspace::test_new("one");
+        let (anchor, direction) = automatic_dock_slot(&one.tabs[0].layout).unwrap();
+        assert_eq!(anchor, one.tabs[0].root_pane);
+        assert_eq!(direction, Direction::Horizontal);
+
+        let mut two = Workspace::test_new("two");
+        two.test_split(Direction::Horizontal);
+        assert_eq!(
+            automatic_dock_slot(&two.tabs[0].layout).unwrap().1,
+            Direction::Vertical
+        );
+
+        let mut stacked = Workspace::test_new("stacked");
+        stacked.test_split(Direction::Vertical);
+        assert_eq!(
+            automatic_dock_slot(&stacked.tabs[0].layout).unwrap().1,
+            Direction::Horizontal
+        );
+    }
+
+    #[test]
+    fn transient_dock_follows_workspace_context_and_restores_the_previous_layout() {
+        let (mut state, attention_pane) = state_with_attention();
+        state.workspaces.push(Workspace::test_new("other"));
+        state.ensure_test_terminals();
+        state.reconcile_attention_dock();
+        assert_eq!(state.pane_location(attention_pane), Some((1, 0)));
+
+        state.switch_workspace(2);
+
+        assert_eq!(state.workspaces[1].tabs[0].layout.pane_count(), 1);
+        assert_eq!(state.workspaces[2].tabs[0].layout.pane_count(), 2);
+        assert_eq!(state.pane_location(attention_pane), Some((2, 0)));
+    }
+
+    #[test]
+    fn visible_attention_is_not_duplicated_in_its_home_tab() {
+        let (mut state, attention_pane) = state_with_attention();
+        state.active = Some(0);
+        state.selected = 0;
+
+        state.reconcile_attention_dock();
+
+        assert_eq!(state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        assert_eq!(state.pane_location(attention_pane), Some((0, 0)));
+        assert!(state.attention_dock.placement.is_none());
+    }
+
+    #[test]
+    fn focused_attention_stays_pinned_when_blocked_work_preempts_the_queue() {
+        let (mut state, attention_pane) = state_with_attention();
+        state.attention_dock.queue[0].kind = AttentionKind::Done;
+        let blocked_home = Workspace::test_new("blocked-home");
+        let blocked_pane = blocked_home.tabs[0].root_pane;
+        state.workspaces.push(blocked_home);
+        state.ensure_test_terminals();
+        state.reconcile_attention_dock();
+        state.focus_pane_in_workspace(1, attention_pane);
+        state.observe_attention_transition(
+            blocked_pane,
             AgentState::Working,
             AgentState::Blocked,
             true,
         );
+
+        state.reconcile_attention_dock();
+
+        assert_eq!(state.pane_location(attention_pane), Some((1, 0)));
+        assert_ne!(state.pane_location(blocked_pane), Some((1, 0)));
+    }
+
+    #[test]
+    fn focused_transient_dock_keeps_the_source_public_id_for_plugins() {
+        let (mut state, attention_pane) = state_with_attention();
+        let source_number = state.workspaces[0].public_pane_numbers[&attention_pane];
+        let source_public_id =
+            crate::workspace::public_pane_id_for_number(&state.workspaces[0].id, source_number);
+        state.reconcile_attention_dock();
+        state.focus_pane_in_workspace(1, attention_pane);
+
+        assert_eq!(
+            state
+                .focused_attention_source_context()
+                .map(|(_, _, _, public_id)| public_id),
+            Some(source_public_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshots_are_identical_with_or_without_a_visible_transient_dock() {
+        let (mut state, attention_pane) = state_with_attention();
+        let terminal_id = state.workspaces[0]
+            .terminal_id(attention_pane)
+            .expect("attention terminal")
+            .clone();
+        let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        terminal_runtimes.insert(
+            terminal_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(40, 10, b"attention history"),
+        );
+        let capture = |state: &AppState| {
+            crate::persist::capture(
+                &state.workspaces,
+                &state.terminals,
+                &terminal_runtimes,
+                state.active,
+                state.selected,
+                state.sidebar_width,
+                state.sidebar_section_split,
+                state.collapsed_space_keys.clone(),
+                state.canonical_attention_exchange(),
+            )
+        };
+        let capture_history = |state: &AppState| {
+            crate::persist::capture_history(
+                &state.workspaces,
+                &terminal_runtimes,
+                state.canonical_attention_exchange(),
+            )
+        };
+        let before = serde_json::to_value(capture(&state)).unwrap();
+        let history_before = serde_json::to_value(capture_history(&state)).unwrap();
+
+        state.reconcile_attention_dock();
+        let during = serde_json::to_value(capture(&state)).unwrap();
+        let history_during = serde_json::to_value(capture_history(&state)).unwrap();
+
+        assert_eq!(during, before);
+        assert_eq!(history_during, history_before);
+    }
+
+    #[test]
+    fn prefix_open_restores_and_follows_the_attention_pane_home() {
+        let (mut state, attention_pane) = state_with_attention();
         state.reconcile_attention_dock();
         state.focus_pane_in_workspace(1, attention_pane);
 
         assert!(state.open_docked_attention());
+
         assert_eq!(state.active, Some(0));
-        assert_eq!(state.workspaces[0].tabs[0].layout.focused(), attention_pane);
-        assert!(state.workspaces[0].pane_state(attention_pane).is_some());
-
-        state.switch_workspace(1);
-        assert!(state.workspaces[1].pane_state(attention_pane).is_some());
-        assert_eq!(state.active, Some(1));
-        state.assert_invariants_for_test();
-    }
-
-    #[test]
-    fn docking_preserves_adversarial_identity_invariants() {
-        let mut state = AppState::test_with_adversarial_identity_state();
-        let attention_pane = state.workspaces[0].tabs[0].root_pane;
-        let mut work = Workspace::test_new("work");
-        let focused_pane = work.tabs[0].root_pane;
-        let dock_pane = work.test_split(Direction::Horizontal);
-        work.tabs[0].layout.focus_pane(focused_pane);
-        state.workspaces.push(work);
-        state.ensure_test_terminals();
-        state.active = Some(1);
-        state.selected = 1;
-        state.mode = Mode::Terminal;
-        state.set_attention_dock(1, dock_pane);
-
-        state.observe_attention_transition(
-            attention_pane,
-            AgentState::Working,
-            AgentState::Blocked,
-            true,
-        );
-        state.reconcile_attention_dock();
-        state.assert_invariants_for_test();
-
-        state.prepare_attention_topology_mutation();
-        state.assert_invariants_for_test();
-    }
-
-    #[test]
-    fn session_snapshot_keeps_attention_pane_at_home_while_docked() {
-        let (mut state, attention_pane, dock_pane) = app_with_dock();
-        let attention_home_number = state.workspaces[0].public_pane_number(attention_pane);
-        let dock_home_number = state.workspaces[1].public_pane_number(dock_pane);
-        state.observe_attention_transition(
-            attention_pane,
-            AgentState::Working,
-            AgentState::Blocked,
-            true,
-        );
-        state.reconcile_attention_dock();
-
-        let snapshot = crate::persist::capture(
-            &state.workspaces,
-            &state.terminals,
-            &crate::terminal::TerminalRuntimeRegistry::new(),
-            state.active,
-            state.selected,
-            state.sidebar_width,
-            state.sidebar_section_split,
-            state.collapsed_space_keys.clone(),
-            state.canonical_attention_exchange(),
-        );
-
-        assert!(snapshot.workspaces[0].tabs[0]
-            .panes
-            .contains_key(&attention_pane.raw()));
-        assert!(snapshot.workspaces[1].tabs[0]
-            .panes
-            .contains_key(&dock_pane.raw()));
-        assert_eq!(
-            snapshot.workspaces[0].public_pane_numbers[&attention_pane.raw()],
-            attention_home_number.expect("attention public number")
-        );
-        assert_eq!(
-            snapshot.workspaces[1].public_pane_numbers[&dock_pane.raw()],
-            dock_home_number.expect("dock public number")
-        );
-    }
-
-    #[test]
-    fn blocked_entries_advance_in_fifo_order() {
-        let (mut state, first_pane, _) = app_with_dock();
-        let second_workspace = Workspace::test_new("second");
-        let second_pane = second_workspace.tabs[0].root_pane;
-        state.workspaces.push(second_workspace);
-        state.ensure_test_terminals();
-
-        state.observe_attention_transition(
-            first_pane,
-            AgentState::Working,
-            AgentState::Blocked,
-            true,
-        );
-        state.observe_attention_transition(
-            second_pane,
-            AgentState::Working,
-            AgentState::Blocked,
-            true,
-        );
-        state.reconcile_attention_dock();
-        assert!(state.workspaces[1].pane_state(first_pane).is_some());
-
-        state.observe_attention_transition(
-            first_pane,
-            AgentState::Blocked,
-            AgentState::Working,
-            true,
-        );
-        state.reconcile_attention_dock();
-        assert!(state.workspaces[1].pane_state(second_pane).is_some());
-        state.assert_invariants_for_test();
-    }
-
-    #[test]
-    fn blocked_preempts_done_and_working_advances_to_next_entry() {
-        let (mut state, done_pane, _) = app_with_dock();
-        let blocked_workspace = Workspace::test_new("blocked");
-        let blocked_pane = blocked_workspace.tabs[0].root_pane;
-        state.workspaces.push(blocked_workspace);
-        state.ensure_test_terminals();
-
-        state.observe_attention_transition(done_pane, AgentState::Working, AgentState::Idle, false);
-        state.reconcile_attention_dock();
-        assert!(state.workspaces[1].pane_state(done_pane).is_some());
-
-        state.observe_attention_transition(
-            blocked_pane,
-            AgentState::Working,
-            AgentState::Blocked,
-            true,
-        );
-        state.reconcile_attention_dock();
-        assert!(state.workspaces[1].pane_state(blocked_pane).is_some());
-        assert!(state.workspaces[0].pane_state(done_pane).is_some());
-
-        state.observe_attention_transition(
-            blocked_pane,
-            AgentState::Blocked,
-            AgentState::Working,
-            true,
-        );
-        state.reconcile_attention_dock();
-        assert!(state.workspaces[1].pane_state(done_pane).is_some());
-        assert!(state.workspaces[2].pane_state(blocked_pane).is_some());
-        state.assert_invariants_for_test();
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(attention_pane));
+        assert_eq!(state.workspaces[1].tabs[0].layout.pane_count(), 1);
     }
 }

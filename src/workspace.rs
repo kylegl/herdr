@@ -1225,6 +1225,34 @@ impl Workspace {
         self.register_new_pane_with_number(pane_id, self.next_public_pane_number);
     }
 
+    pub(crate) fn insert_transient_pane(
+        &mut self,
+        tab_idx: usize,
+        anchor: PaneId,
+        direction: Direction,
+    ) -> Option<(PaneId, TerminalId)> {
+        let pane_id = PaneId::alloc();
+        let terminal_id = TerminalId::alloc();
+        let tab = self.tabs.get_mut(tab_idx)?;
+        if !tab
+            .layout
+            .insert_pane_near(anchor, pane_id, direction, 0.5, false)
+        {
+            return None;
+        }
+        tab.panes
+            .insert(pane_id, PaneState::new(terminal_id.clone()));
+        self.register_new_pane_with_number(pane_id, self.next_public_pane_number);
+        Some((pane_id, terminal_id))
+    }
+
+    pub(crate) fn remove_transient_pane(&mut self, pane_id: PaneId) -> Option<TerminalId> {
+        let tab_idx = self.find_tab_index_for_pane(pane_id)?;
+        let (_, terminal_id) = self.tabs.get_mut(tab_idx)?.remove_pane(pane_id)?;
+        self.unregister_pane(pane_id);
+        Some(terminal_id)
+    }
+
     fn register_new_pane_with_number(&mut self, pane_id: PaneId, number: usize) {
         self.public_pane_numbers.insert(pane_id, number);
         self.next_public_pane_number = self.next_public_pane_number.max(number + 1);

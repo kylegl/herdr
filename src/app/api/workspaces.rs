@@ -139,6 +139,7 @@ impl App {
 
         let workspace_id = self.public_workspace_id(index);
         let insert_index = params.insert_index;
+        self.state.prepare_attention_topology_mutation();
         let moved = self.state.move_workspace(index, insert_index);
         let workspaces = self.workspace_list_info();
         if moved {
@@ -207,6 +208,7 @@ impl App {
             None => None,
         };
 
+        self.state.prepare_attention_topology_mutation();
         let moved = self
             .state
             .move_workspace_block(&workspace_ids, before_workspace_id.as_deref());

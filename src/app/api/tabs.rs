@@ -45,6 +45,7 @@ impl App {
     }
 
     pub(super) fn handle_tab_create(&mut self, id: String, params: TabCreateParams) -> String {
+        self.state.prepare_attention_topology_mutation();
         let TabCreateParams {
             workspace_id,
             cwd,
@@ -198,6 +199,7 @@ impl App {
             .unwrap_or_else(|| crate::workspace::public_tab_id_for_number(&ws.id, tab_idx + 1));
         let workspace_id = self.public_workspace_id(ws_idx);
         let insert_index = params.insert_index;
+        self.state.prepare_attention_topology_mutation();
         let moved = self
             .state
             .workspaces

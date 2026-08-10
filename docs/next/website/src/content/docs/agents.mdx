@@ -96,13 +96,13 @@ This is the main Herdr workflow: start several agents, let them work in parallel
 
 ## Attention dock
 
-Reserve a pane in each workspace for agents that need attention. Right-click the pane and choose **Set as attention dock**. Herdr keeps one global queue: blocked agents come first, followed by agents that finished in the background, with first-in-first-out ordering inside each group.
+Herdr automatically presents agents that need attention in the active tab. It keeps one global queue: blocked agents come first, followed by agents that finished in the background, with first-in-first-out ordering inside each group.
 
-The queue head swaps into the active workspace's dock without changing the focused pane. When you switch workspaces, Herdr restores the agent to its original layout position and presents it in the new workspace's dock when that workspace has one in its active tab. A focused dock is left unchanged so Herdr never redirects your input.
+The queue head moves into a temporary tiled split without changing the focused pane. One pane splits to the right; two side-by-side panes split below the right pane; larger layouts extend the southeast pane to the right. Switching workspace or tab restores the agent and removes the previous temporary split before creating one in the new context. Herdr does not create a duplicate when the agent is already visible in the active tab.
 
-Focusing or viewing the docked agent does not remove it from the queue. It leaves only after it returns to `working`; then Herdr restores it home and presents the next entry. On the focused docked agent, `prefix+o` restores it to its original workspace, tab, and layout position, switches there, and focuses it. The agent remains queued until it starts working, so it can follow again after you leave.
+Focusing or viewing the temporary pane does not remove it from the queue. A focused entry stays pinned so Herdr never redirects your input. It leaves only after it returns to `working`; then Herdr restores it home and presents the next entry. On the focused attention pane, `prefix+o` restores it to its original workspace, tab, and layout position, switches there, and focuses it.
 
-Right-click the dock and choose **Clear attention dock** to remove the designation. Dock designations and the attention queue belong to the live server session; a full server restart clears them. Session snapshots always save panes in their original layout positions rather than their temporary dock positions.
+Attention placement and the queue belong to the live server session and are cleared by a full server restart. Session snapshots always save the original layout without temporary splits.
 
 ## Direct integrations
 

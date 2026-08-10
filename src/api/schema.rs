@@ -63,10 +63,6 @@ pub enum Method {
     ClientWindowTitleClear(EmptyParams),
     #[serde(rename = "session.snapshot")]
     SessionSnapshot(EmptyParams),
-    #[serde(rename = "attention_dock.set")]
-    AttentionDockSet(PaneTarget),
-    #[serde(rename = "attention_dock.clear")]
-    AttentionDockClear(WorkspaceTarget),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]

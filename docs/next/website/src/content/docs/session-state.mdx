@@ -34,7 +34,7 @@ If the Herdr server stops and starts again, the original pane processes are gone
 
 Snapshot restore does not preserve running shells, servers, tests, or arbitrary processes. Panes that cannot use a stronger restore path come back as new shells in their saved directories.
 
-Attention-dock placement is temporary: snapshots save a docked pane back at its original layout position. Dock designations and the live attention queue are cleared by a full server restart and can be set again from each pane's context menu.
+Attention-dock placement is temporary: snapshots omit its transient split and save the attention pane in its original layout position. The live attention queue is cleared by a full server restart.
 
 ## Pane screen history replay
 
