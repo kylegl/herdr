@@ -3,7 +3,7 @@ use crate::{
     detect::AgentState,
     layout::{Node, PaneId, TileLayout},
     terminal::{TerminalId, TerminalState},
-    workspace::Tab,
+    workspace::{Tab, Workspace},
 };
 use ratatui::layout::{Direction, Rect};
 
@@ -52,9 +52,11 @@ struct DockPlacement {
     displaced_pane: PaneId,
     transient_terminal: TerminalId,
     attention_home_workspace_id: String,
+    attention_home_workspace_name: String,
     attention_home_ws_idx: usize,
     attention_home_tab_idx: usize,
     dock_workspace_id: String,
+    dock_workspace_name: String,
     dock_tab_idx: usize,
     dock_was_zoomed: bool,
     dock_next_public_pane_number_before: usize,
@@ -195,6 +197,10 @@ impl AppState {
             return;
         };
         let attention_home_workspace_id = self.workspaces[attention_home_ws_idx].id.clone();
+        let attention_home_workspace_name =
+            self.workspaces[attention_home_ws_idx].display_name_from_terminals(&self.terminals);
+        let dock_workspace_name =
+            self.workspaces[active_ws_idx].display_name_from_terminals(&self.terminals);
         let (anchor, direction, focused, dock_was_zoomed, cwd) = {
             let workspace = &self.workspaces[active_ws_idx];
             let tab = &workspace.tabs[dock_tab_idx];
@@ -239,9 +245,11 @@ impl AppState {
             displaced_pane: dock_pane,
             transient_terminal,
             attention_home_workspace_id,
+            attention_home_workspace_name,
             attention_home_ws_idx,
             attention_home_tab_idx,
             dock_workspace_id,
+            dock_workspace_name,
             dock_tab_idx,
             dock_was_zoomed,
             dock_next_public_pane_number_before,
@@ -339,15 +347,22 @@ impl AppState {
         if placement.attention_pane != pane_id {
             return None;
         }
-        self.workspaces
-            .iter()
-            .find(|workspace| workspace.id == placement.attention_home_workspace_id)
-            .map(|workspace| {
-                format!(
-                    "WORKSPACE - {}",
-                    workspace.display_name_from_terminals(&self.terminals)
-                )
-            })
+        Some(format!(
+            "WORKSPACE - {}",
+            placement.attention_home_workspace_name
+        ))
+    }
+
+    pub(crate) fn workspace_display_name(&self, workspace: &Workspace) -> String {
+        if let Some(placement) = &self.attention_dock.placement {
+            if workspace.id == placement.attention_home_workspace_id {
+                return placement.attention_home_workspace_name.clone();
+            }
+            if workspace.id == placement.dock_workspace_id {
+                return placement.dock_workspace_name.clone();
+            }
+        }
+        workspace.display_name_from_terminals(&self.terminals)
     }
 
     pub(crate) fn prepare_attention_topology_mutation(&mut self) {
@@ -881,6 +896,11 @@ mod tests {
                 .as_deref(),
             Some("WORKSPACE - attention-home")
         );
+        assert_eq!(
+            state.workspace_display_name(&state.workspaces[0]),
+            "attention-home"
+        );
+        assert_eq!(state.workspace_display_name(&state.workspaces[1]), "work");
         state.assert_invariants_for_test();
     }
 
