@@ -1160,6 +1160,11 @@ impl HeadlessServer {
             }
         };
 
+        // Runtime pane IDs must describe the same canonical topology as the
+        // snapshot. Physically restore transient attention swaps before both
+        // are captured so imported PTYs cannot attach to displaced panes.
+        self.app.state.prepare_attention_handoff();
+
         let mut pane_by_terminal = HashMap::new();
         for ws in &self.app.state.workspaces {
             for tab in &ws.tabs {
@@ -1170,6 +1175,7 @@ impl HeadlessServer {
         }
         if pane_by_terminal.len() > crate::server::handoff::MAX_FDS_PER_HANDOFF {
             let _ = std::fs::remove_file(&socket_path);
+            self.app.state.reconcile_attention_dock();
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
@@ -1415,6 +1421,7 @@ impl HeadlessServer {
         }
         self.handoff_in_progress = false;
         let _ = std::fs::remove_file(socket_path);
+        self.app.state.reconcile_attention_dock();
     }
 
     #[cfg(unix)]
@@ -4838,6 +4845,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             &received.manifest.snapshot,
             &mut imports,
         )?;
+        app.state.rebuild_attention_queue_after_handoff();
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
         app.local_input_source_switch = false;

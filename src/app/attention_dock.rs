@@ -79,6 +79,42 @@ pub(crate) struct AttentionDockState {
 }
 
 impl AppState {
+    pub(crate) fn rebuild_attention_queue_after_handoff(&mut self) {
+        let mut candidates = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|(pane_id, pane)| {
+                let terminal = self.terminals.get(&pane.attached_terminal_id)?;
+                let kind = match (terminal.state, pane.seen) {
+                    (AgentState::Blocked, _) => AttentionKind::Blocked,
+                    (AgentState::Idle, false) => AttentionKind::Done,
+                    _ => return None,
+                };
+                Some((
+                    *pane_id,
+                    kind,
+                    terminal.last_agent_state_change_seq.unwrap_or(0),
+                ))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(_, _, sequence)| *sequence);
+
+        self.attention_dock = AttentionDockState::default();
+        let eligible_at = Instant::now() + ATTENTION_DEBOUNCE;
+        for (pane_id, kind, _) in candidates {
+            self.attention_dock.next_sequence += 1;
+            self.attention_dock.queue.push(AttentionEntry {
+                pane_id,
+                kind,
+                sequence: self.attention_dock.next_sequence,
+                eligible_at,
+                ready: false,
+            });
+        }
+    }
+
     pub(crate) fn observe_attention_transition(
         &mut self,
         pane_id: PaneId,
@@ -153,12 +189,19 @@ impl AppState {
         }
 
         if let Some(placement) = &self.attention_dock.placement {
-            let pinned = self.active.is_some_and(|ws_idx| {
-                ws_idx < self.workspaces.len()
-                    && self.workspaces[ws_idx].id == placement.dock_workspace_id
-                    && self.workspaces[ws_idx].active_tab_index() == placement.dock_tab_idx
-                    && self.workspaces[ws_idx].focused_pane_id() == Some(placement.attention_pane)
-            });
+            let placement_is_still_queued = self
+                .attention_dock
+                .queue
+                .iter()
+                .any(|entry| entry.pane_id == placement.attention_pane);
+            let pinned = placement_is_still_queued
+                && self.active.is_some_and(|ws_idx| {
+                    ws_idx < self.workspaces.len()
+                        && self.workspaces[ws_idx].id == placement.dock_workspace_id
+                        && self.workspaces[ws_idx].active_tab_index() == placement.dock_tab_idx
+                        && self.workspaces[ws_idx].focused_pane_id()
+                            == Some(placement.attention_pane)
+                });
             if pinned {
                 return;
             }
@@ -441,6 +484,25 @@ impl AppState {
 
     pub(crate) fn prepare_attention_topology_mutation(&mut self) {
         self.undock_attention();
+    }
+
+    pub(crate) fn prepare_attention_handoff(&mut self) {
+        let unseen_done_panes = self
+            .attention_dock
+            .queue
+            .iter()
+            .filter_map(|entry| (entry.kind == AttentionKind::Done).then_some(entry.pane_id))
+            .collect::<std::collections::HashSet<_>>();
+        self.undock_attention();
+        for workspace in &mut self.workspaces {
+            for tab in &mut workspace.tabs {
+                for (pane_id, pane) in &mut tab.panes {
+                    if unseen_done_panes.contains(pane_id) {
+                        pane.seen = false;
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn prepare_attention_pane_move(&mut self, _pane_id: PaneId) {
@@ -1007,6 +1069,44 @@ mod tests {
     }
 
     #[test]
+    fn handoff_restores_done_attention_home_and_keeps_it_unseen() {
+        let (mut state, attention_pane) = state_with_attention();
+        state.attention_dock.queue[0].kind = AttentionKind::Done;
+        state.reconcile_attention_dock();
+        state.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&attention_pane)
+            .unwrap()
+            .seen = true;
+
+        state.prepare_attention_handoff();
+
+        assert_eq!(state.pane_location(attention_pane), Some((0, 0)));
+        assert!(!state.workspaces[0].tabs[0].panes[&attention_pane].seen);
+    }
+
+    #[test]
+    fn handoff_rebuilds_unseen_attention_queue() {
+        let (mut state, attention_pane) = state_with_attention();
+        let terminal_id = state.workspaces[0]
+            .terminal_id(attention_pane)
+            .expect("attention terminal")
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Idle;
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&attention_pane)
+            .unwrap()
+            .seen = false;
+
+        state.rebuild_attention_queue_after_handoff();
+
+        assert_eq!(state.attention_dock.queue.len(), 1);
+        assert_eq!(state.attention_dock.queue[0].kind, AttentionKind::Done);
+        assert!(state.next_attention_deadline().is_some());
+    }
+
+    #[test]
     fn attention_waits_for_a_stable_state_before_projecting() {
         let (mut brief, brief_pane) = state_with_attention();
         brief.attention_dock.queue[0].eligible_at = Instant::now() + ATTENTION_DEBOUNCE;
@@ -1179,6 +1279,24 @@ mod tests {
         state.reconcile_attention_dock();
 
         assert_eq!(state.workspaces[0].tabs[0].layout.pane_count(), 1);
+        assert_eq!(state.pane_location(attention_pane), Some((0, 0)));
+        assert!(state.attention_dock.placement.is_none());
+    }
+
+    #[test]
+    fn focused_attention_restores_as_soon_as_it_returns_to_working() {
+        let (mut state, attention_pane) = state_with_attention();
+        state.reconcile_attention_dock();
+        state.focus_pane_in_workspace(1, attention_pane);
+
+        state.observe_attention_transition(
+            attention_pane,
+            AgentState::Blocked,
+            AgentState::Working,
+            true,
+        );
+        state.reconcile_attention_dock();
+
         assert_eq!(state.pane_location(attention_pane), Some((0, 0)));
         assert!(state.attention_dock.placement.is_none());
     }
