@@ -6,6 +6,9 @@ use crate::{
     workspace::{Tab, Workspace},
 };
 use ratatui::layout::{Direction, Rect};
+use std::time::{Duration, Instant};
+
+const ATTENTION_DEBOUNCE: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttentionKind {
@@ -18,6 +21,8 @@ struct AttentionEntry {
     pane_id: PaneId,
     kind: AttentionKind,
     sequence: u64,
+    eligible_at: Instant,
+    ready: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,8 +113,10 @@ impl AppState {
             .iter_mut()
             .find(|entry| entry.pane_id == pane_id)
         {
-            if kind == AttentionKind::Blocked {
+            if kind == AttentionKind::Blocked && entry.kind != AttentionKind::Blocked {
                 entry.kind = AttentionKind::Blocked;
+                entry.eligible_at = Instant::now() + ATTENTION_DEBOUNCE;
+                entry.ready = false;
             }
         } else {
             self.attention_dock.next_sequence += 1;
@@ -117,6 +124,8 @@ impl AppState {
                 pane_id,
                 kind,
                 sequence: self.attention_dock.next_sequence,
+                eligible_at: Instant::now() + ATTENTION_DEBOUNCE,
+                ready: false,
             });
         }
     }
@@ -456,10 +465,50 @@ impl AppState {
         }
     }
 
-    fn attention_head(&self) -> Option<PaneId> {
+    pub(crate) fn next_attention_deadline(&self) -> Option<Instant> {
+        let now = Instant::now();
         self.attention_dock
             .queue
             .iter()
+            .filter_map(|entry| {
+                (!entry.ready && entry.eligible_at > now).then_some(entry.eligible_at)
+            })
+            .min()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn make_attention_ready_for_test(&mut self, pane_id: PaneId) {
+        if let Some(entry) = self
+            .attention_dock
+            .queue
+            .iter_mut()
+            .find(|entry| entry.pane_id == pane_id)
+        {
+            entry.eligible_at = Instant::now();
+            entry.ready = true;
+        }
+    }
+
+    pub(crate) fn reconcile_due_attention(&mut self, now: Instant) -> bool {
+        let mut became_ready = false;
+        for entry in &mut self.attention_dock.queue {
+            if !entry.ready && entry.eligible_at <= now {
+                entry.ready = true;
+                became_ready = true;
+            }
+        }
+        if became_ready {
+            self.reconcile_attention_dock();
+        }
+        became_ready
+    }
+
+    fn attention_head(&self) -> Option<PaneId> {
+        let now = Instant::now();
+        self.attention_dock
+            .queue
+            .iter()
+            .filter(|entry| entry.ready || entry.eligible_at <= now)
             .min_by_key(|entry| {
                 let priority = match entry.kind {
                     AttentionKind::Blocked => 0,
@@ -894,7 +943,34 @@ mod tests {
             AgentState::Blocked,
             true,
         );
+        state.attention_dock.queue[0].eligible_at = Instant::now();
+        state.attention_dock.queue[0].ready = true;
         (state, attention_pane)
+    }
+
+    #[test]
+    fn attention_waits_for_a_stable_state_before_projecting() {
+        let (mut brief, brief_pane) = state_with_attention();
+        brief.attention_dock.queue[0].eligible_at = Instant::now() + ATTENTION_DEBOUNCE;
+        brief.attention_dock.queue[0].ready = false;
+
+        brief.reconcile_attention_dock();
+        assert!(brief.attention_dock.placement.is_none());
+        brief.observe_attention_transition(
+            brief_pane,
+            AgentState::Blocked,
+            AgentState::Working,
+            true,
+        );
+        assert!(!brief.reconcile_due_attention(Instant::now() + ATTENTION_DEBOUNCE));
+        assert!(brief.attention_dock.placement.is_none());
+
+        let (mut stable, stable_pane) = state_with_attention();
+        stable.attention_dock.queue[0].eligible_at = Instant::now() - ATTENTION_DEBOUNCE;
+        stable.attention_dock.queue[0].ready = false;
+        assert!(stable.reconcile_due_attention(Instant::now()));
+        assert!(!stable.reconcile_due_attention(Instant::now()));
+        assert_eq!(stable.pane_location(stable_pane), Some((1, 0)));
     }
 
     #[test]
@@ -1044,6 +1120,7 @@ mod tests {
             AgentState::Blocked,
             true,
         );
+        state.make_attention_ready_for_test(blocked_pane);
 
         state.reconcile_attention_dock();
 

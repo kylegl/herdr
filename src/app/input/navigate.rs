@@ -2607,6 +2607,7 @@ mod tests {
             crate::detect::AgentState::Blocked,
             true,
         );
+        app.state.make_attention_ready_for_test(attention_pane);
         app.state.reconcile_attention_dock();
         app.state.focus_pane_in_workspace(1, attention_pane);
         app.state.mode = Mode::Prefix;

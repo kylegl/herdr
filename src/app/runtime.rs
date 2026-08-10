@@ -302,6 +302,10 @@ impl App {
             changed = true;
         }
 
+        if self.state.reconcile_due_attention(now) {
+            changed = true;
+        }
+
         if self
             .state
             .next_pending_agent_notification_deadline()
@@ -588,6 +592,7 @@ impl App {
             self.config_diagnostic_deadline,
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
+            self.state.next_attention_deadline(),
             self.state.next_managed_agent_deadline(),
             self.copy_feedback_deadline,
             include_git_refresh

@@ -2465,6 +2465,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
             crate::detect::AgentState::Blocked,
             true,
         );
+        app.state.make_attention_ready_for_test(source_pane);
         app.state.reconcile_attention_dock();
         app.state.focus_pane_in_workspace(1, source_pane);
 
