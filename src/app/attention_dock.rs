@@ -342,7 +342,12 @@ impl AppState {
         self.workspaces
             .iter()
             .find(|workspace| workspace.id == placement.attention_home_workspace_id)
-            .map(|workspace| workspace.display_name_from_terminals(&self.terminals))
+            .map(|workspace| {
+                format!(
+                    "WORKSPACE - {}",
+                    workspace.display_name_from_terminals(&self.terminals)
+                )
+            })
     }
 
     pub(crate) fn prepare_attention_topology_mutation(&mut self) {
@@ -874,7 +879,7 @@ mod tests {
             state
                 .attention_dock_title_for_pane(attention_pane)
                 .as_deref(),
-            Some("attention-home")
+            Some("WORKSPACE - attention-home")
         );
         state.assert_invariants_for_test();
     }
