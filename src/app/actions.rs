@@ -386,13 +386,13 @@ impl AppState {
         let query_kind = navigator_query_kind(&query, self.navigator.state_filter);
         let mut rows = Vec::new();
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
-            let workspace_label = ws.display_name_from(&self.terminals, terminal_runtimes);
+            let workspace_label = self.workspace_display_name_from(ws, terminal_runtimes);
             let activity = workspace_activity_summary(ws, &self.terminals);
             let workspace_search_text = format!("{workspace_label} {activity}").to_lowercase();
             let workspace_matches = match query_kind {
                 NavigatorQueryKind::Empty => true,
                 NavigatorQueryKind::State(filter) => {
-                    let (state, seen) = ws.aggregate_state(&self.terminals);
+                    let (state, seen) = self.workspace_aggregate_state(ws);
                     navigator_state_filter_matches(filter, state, seen)
                 }
                 NavigatorQueryKind::Text => navigator_matches(&query, &workspace_search_text),
@@ -406,7 +406,7 @@ impl AppState {
 
             let expanded = !matches!(query_kind, NavigatorQueryKind::Empty)
                 || self.navigator.expanded_workspaces.contains(&ws.id);
-            let (state, seen) = ws.aggregate_state(&self.terminals);
+            let (state, seen) = self.workspace_aggregate_state(ws);
             let pane_count = ws.tabs.iter().map(|tab| tab.panes.len()).sum::<usize>();
             rows.push(NavigatorRow {
                 target: NavigatorTarget::Workspace { ws_idx },

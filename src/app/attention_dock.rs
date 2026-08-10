@@ -362,6 +362,54 @@ impl AppState {
         ))
     }
 
+    pub(crate) fn workspace_aggregate_state(&self, workspace: &Workspace) -> (AgentState, bool) {
+        let Some(placement) = &self.attention_dock.placement else {
+            return workspace.aggregate_state(&self.terminals);
+        };
+        if placement.attention_home_workspace_id == placement.dock_workspace_id
+            || (workspace.id != placement.attention_home_workspace_id
+                && workspace.id != placement.dock_workspace_id)
+        {
+            return workspace.aggregate_state(&self.terminals);
+        }
+
+        let excluded_pane = if workspace.id == placement.attention_home_workspace_id {
+            placement.displaced_pane
+        } else {
+            placement.attention_pane
+        };
+        let mut states = workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter(|(pane_id, _)| **pane_id != excluded_pane)
+            .filter_map(|(_, pane)| {
+                self.terminals
+                    .get(&pane.attached_terminal_id)
+                    .map(|terminal| (terminal.state, pane.seen))
+            })
+            .collect::<Vec<_>>();
+
+        if workspace.id == placement.attention_home_workspace_id {
+            states.extend(
+                self.workspaces
+                    .iter()
+                    .flat_map(|candidate| &candidate.tabs)
+                    .filter_map(|tab| {
+                        let pane = tab.panes.get(&placement.attention_pane)?;
+                        self.terminals
+                            .get(&pane.attached_terminal_id)
+                            .map(|terminal| (terminal.state, pane.seen))
+                    }),
+            );
+        }
+
+        states
+            .into_iter()
+            .max_by_key(|(state, seen)| attention_state_priority(*state, *seen))
+            .unwrap_or((AgentState::Unknown, true))
+    }
+
     pub(crate) fn workspace_display_name(&self, workspace: &Workspace) -> String {
         if let Some(name) = self.stable_attention_workspace_name(workspace) {
             return name.to_owned();
@@ -895,6 +943,16 @@ fn two_tabs_mut(tabs: &mut [Tab], first: usize, second: usize) -> (&mut Tab, &mu
     }
 }
 
+fn attention_state_priority(state: AgentState, seen: bool) -> u8 {
+    match (state, seen) {
+        (AgentState::Blocked, _) => 4,
+        (AgentState::Idle, false) => 3,
+        (AgentState::Working, _) => 2,
+        (AgentState::Idle, true) => 1,
+        (AgentState::Unknown, _) => 0,
+    }
+}
+
 fn automatic_dock_slot(layout: &TileLayout) -> Option<(PaneId, Direction)> {
     let pane_count = layout.pane_count();
     let anchor = layout
@@ -995,6 +1053,27 @@ mod tests {
         );
         assert_eq!(state.workspace_display_name(&state.workspaces[1]), "work");
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn projected_attention_keeps_aggregate_state_with_its_home_workspace() {
+        let (mut state, attention_pane) = state_with_attention();
+        let terminal_id = state.workspaces[0]
+            .terminal_id(attention_pane)
+            .expect("attention terminal")
+            .clone();
+        state.terminals.get_mut(&terminal_id).unwrap().state = AgentState::Blocked;
+
+        state.reconcile_attention_dock();
+
+        assert_eq!(
+            state.workspace_aggregate_state(&state.workspaces[0]),
+            (AgentState::Blocked, true)
+        );
+        assert_eq!(
+            state.workspace_aggregate_state(&state.workspaces[1]),
+            (AgentState::Unknown, true)
+        );
     }
 
     #[test]

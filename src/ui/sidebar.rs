@@ -194,7 +194,7 @@ pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static 
 }
 
 fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indented: bool) -> u16 {
-    let (state, seen) = ws.aggregate_state(&app.terminals);
+    let (state, seen) = app.workspace_aggregate_state(ws);
     let label = if indented {
         grouped_child_display_label(
             &app.workspace_display_name(ws),
@@ -252,7 +252,7 @@ fn space_aggregate_state(app: &AppState, key: &str) -> (AgentState, bool) {
     app.workspaces
         .iter()
         .filter(|ws| ws.worktree_space().is_some_and(|space| space.key == key))
-        .map(|ws| ws.aggregate_state(&app.terminals))
+        .map(|ws| app.workspace_aggregate_state(ws))
         .max_by_key(|(state, seen)| workspace_attention_priority(*state, *seen))
         .unwrap_or((AgentState::Unknown, true))
 }
@@ -783,7 +783,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
         if y >= ws_area.y + ws_area.height {
             break;
         }
-        let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
+        let (agg_state, agg_seen) = app.workspace_aggregate_state(ws);
         let (icon, icon_style) = state_icon(agg_state, agg_seen, app.status_indicators, p);
         let is_selected = visible_idx == app.selected && is_navigating;
         let is_active = Some(visible_idx) == app.active;
@@ -1325,7 +1325,7 @@ fn render_workspace_list(
         let is_active = Some(i) == app.active;
         let is_dragged = dragged_ws_idx == Some(i);
         let highlighted = selected || is_active || is_dragged;
-        let (agg_state, agg_seen) = ws.aggregate_state(&app.terminals);
+        let (agg_state, agg_seen) = app.workspace_aggregate_state(ws);
 
         if highlighted {
             let bg = if selected {

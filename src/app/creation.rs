@@ -491,11 +491,13 @@ impl App {
 
     pub(super) fn workspace_info(&self, index: usize) -> crate::api::schema::WorkspaceInfo {
         let ws = &self.state.workspaces[index];
-        let (agg_state, seen) = ws.aggregate_state(&self.state.terminals);
+        let (agg_state, seen) = self.state.workspace_aggregate_state(ws);
         crate::api::schema::WorkspaceInfo {
             workspace_id: self.public_workspace_id(index),
             number: index + 1,
-            label: ws.display_name_from(&self.state.terminals, &self.terminal_runtimes),
+            label: self
+                .state
+                .workspace_display_name_from(ws, &self.terminal_runtimes),
             focused: self.state.active == Some(index),
             pane_count: ws.public_pane_numbers.len(),
             tab_count: ws.tabs.len(),
