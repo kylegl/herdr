@@ -2,7 +2,7 @@ use crate::{
     app::state::AppState,
     detect::AgentState,
     layout::{Node, PaneId, TileLayout},
-    terminal::{TerminalId, TerminalState},
+    terminal::{TerminalId, TerminalRuntimeRegistry, TerminalState},
     workspace::{Tab, Workspace},
 };
 use ratatui::layout::{Direction, Rect};
@@ -354,15 +354,32 @@ impl AppState {
     }
 
     pub(crate) fn workspace_display_name(&self, workspace: &Workspace) -> String {
-        if let Some(placement) = &self.attention_dock.placement {
-            if workspace.id == placement.attention_home_workspace_id {
-                return placement.attention_home_workspace_name.clone();
-            }
-            if workspace.id == placement.dock_workspace_id {
-                return placement.dock_workspace_name.clone();
-            }
+        if let Some(name) = self.stable_attention_workspace_name(workspace) {
+            return name.to_owned();
         }
         workspace.display_name_from_terminals(&self.terminals)
+    }
+
+    pub(crate) fn workspace_display_name_from(
+        &self,
+        workspace: &Workspace,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> String {
+        if let Some(name) = self.stable_attention_workspace_name(workspace) {
+            return name.to_owned();
+        }
+        workspace.display_name_from(&self.terminals, terminal_runtimes)
+    }
+
+    fn stable_attention_workspace_name<'a>(&'a self, workspace: &Workspace) -> Option<&'a str> {
+        let placement = self.attention_dock.placement.as_ref()?;
+        if workspace.id == placement.attention_home_workspace_id {
+            return Some(&placement.attention_home_workspace_name);
+        }
+        if workspace.id == placement.dock_workspace_id {
+            return Some(&placement.dock_workspace_name);
+        }
+        None
     }
 
     pub(crate) fn prepare_attention_topology_mutation(&mut self) {
