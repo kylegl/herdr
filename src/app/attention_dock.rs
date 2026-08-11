@@ -79,6 +79,7 @@ pub(crate) struct AttentionDockState {
 }
 
 impl AppState {
+    #[cfg(any(unix, test))]
     pub(crate) fn rebuild_attention_queue_after_handoff(&mut self) {
         let mut candidates = self
             .workspaces
@@ -486,6 +487,7 @@ impl AppState {
         self.undock_attention();
     }
 
+    #[cfg(any(unix, test))]
     pub(crate) fn prepare_attention_handoff(&mut self) {
         let unseen_done_panes = self
             .attention_dock
