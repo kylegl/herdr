@@ -96,13 +96,15 @@ This is the main Herdr workflow: start several agents, let them work in parallel
 
 ## Attention dock
 
-Herdr automatically presents agents that need attention in the active tab. It keeps one global queue: blocked agents come first, followed by agents that finished in the background, with first-in-first-out ordering inside each group.
+Herdr automatically presents agents that need attention in the active tab. It keeps one global queue: blocked agents come first, followed by agents that finished in the background, with first-in-first-out ordering inside each group. A state must remain blocked or done for 300 milliseconds before it enters the visible queue, so brief transitions back to working do not flash a temporary pane.
 
-The queue head moves into a temporary tiled split without changing the focused pane. One pane splits to the right; two side-by-side panes split below the right pane; larger layouts extend the southeast pane to the right. Switching workspace or tab restores the agent and removes the previous temporary split before creating one in the new context. Herdr does not create a duplicate when the agent is already visible in the active tab.
+The queue head moves into a temporary tiled split without changing the focused pane. One pane splits to the right; two side-by-side panes split below the right pane; larger layouts extend the southeast pane to the right. Switching workspace or tab restores the agent and removes the previous temporary split before creating one in the new context. Herdr does not create a duplicate when the agent is already visible in the active tab. The temporary border reads `WORKSPACE - <name>` using the agent's home workspace name.
 
 Focusing or viewing the temporary pane does not remove it from the queue. A focused entry stays pinned so Herdr never redirects your input. It leaves only after it returns to `working`; then Herdr restores it home and presents the next entry. On the focused attention pane, `prefix+o` restores it to its original workspace, tab, and layout position, switches there, and focuses it.
 
-Attention placement and the queue belong to the live server session and are cleared by a full server restart. Session snapshots always save the original layout without temporary splits.
+The real pane and PTY move into the temporary split so wrapping, cursor, mouse, and input remain native. This is server topology, so every attached client can observe the temporary placement. Workspace names and state remain attributed to the pane's home workspace.
+
+Attention placement and the queue belong to the live server session and are cleared by a full server restart. A live handoff restores canonical topology, transfers the PTY, and reconstructs blocked and unseen-done queue entries. Session snapshots always save the original layout without temporary splits.
 
 ## Direct integrations
 

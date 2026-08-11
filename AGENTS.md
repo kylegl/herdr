@@ -35,16 +35,18 @@ This checkout is the maintained `kylegl/herdr` fork when `origin` resolves to
 - Never commit or push custom work to `herdrdev/herdr`, and never enable an
   `upstream` push URL. Upstream contributions require their own explicitly
   approved workflow under the external-contributor rules below.
-- Fork `master` carries the maintained Pi lifecycle extension patch. Start work
-  on a task branch from `master`, push it only to `origin`, and target pull
-  requests at `kylegl/herdr:master`.
+- Fork `master` carries maintained Pi lifecycle and automatic attention-dock
+  patches. Start work on a task branch from `master`, push it only to `origin`,
+  and target pull requests at `kylegl/herdr:master`.
 - Keep the fork current by merging `upstream/master` into fork `master`; do not
   rebase or force-push published fork history.
 - Before editing or pushing, run `scripts/fork-preflight.sh`. Stop if it reports
   a remote, tracking, or repository mismatch.
 
 See `.agents/docs/fork-maintenance.md` for the authoritative sync, development,
-installation, and upstream-adoption procedures.
+installation, and upstream-adoption procedures. When upstream changes pane
+topology, lifecycle transitions, persistence, handoff, plugin context, or pane
+rendering, also read `.agents/docs/attention-dock-maintenance.md` before merging.
 
 ## Scope and Audience
 

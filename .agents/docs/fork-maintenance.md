@@ -1,10 +1,18 @@
 # kylegl/herdr fork maintenance
 
-This repository is the maintained fork used to extend Herdr's official Pi
-lifecycle integration with a package-neutral `herdr:busy` sibling-event overlay
-and explicit blocked-state tracking for Pi's interactive `ask` tool. The
-integration remains part of the Herdr source tree and is installed by the Herdr
-binary.
+This repository is the maintained fork used for two fork-only capabilities:
+
+1. Herdr's official Pi lifecycle integration consumes the package-neutral
+   `herdr:busy` sibling-event overlay and tracks Pi's interactive `ask` tool as
+   blocked.
+2. The server automatically presents blocked and unseen-done agents through a
+   transient physical attention pane exchange.
+
+The Pi integration remains part of the Herdr source tree and is installed by the
+Herdr binary. The attention workflow changes core topology, persistence, live
+handoff, and UI behavior; read
+[`attention-dock-maintenance.md`](attention-dock-maintenance.md) before syncing
+upstream changes in those areas.
 
 ## Repository authority
 
@@ -103,13 +111,17 @@ just check
 git push origin master
 ```
 
-Resolve conflicts in favor of current upstream behavior while preserving the
-busy overlay. Pay particular attention to:
+Resolve conflicts in favor of current upstream behavior while preserving both
+fork capabilities. For Pi lifecycle changes, pay particular attention to:
 
 - `src/integration/assets/pi/herdr-agent-state.ts`
 - `src/integration/assets/herdr-agent-state.test.ts`
 - `src/integration/mod.rs`
 - Pi integration version constants and markers
+
+For pane topology, lifecycle, persistence, handoff, plugin context, or rendering
+changes, follow the ownership map and merge procedure in
+[`attention-dock-maintenance.md`](attention-dock-maintenance.md).
 
 After every sync, verify that the Pi integration still:
 
@@ -121,9 +133,10 @@ After every sync, verify that the Pi integration still:
 5. remains inert outside an eligible Herdr-managed Pi TUI;
 6. preserves socket ordering, retries, reload handling, and platform mapping.
 
-If original Herdr adopts an equivalent busy overlay, stop before resolving the
-overlap. Compare behavior and tests, then remove the fork patch deliberately
-rather than carrying both implementations.
+If original Herdr adopts an equivalent busy overlay or automatic attention
+workflow, stop before resolving the overlap. Compare behavior and tests, then
+remove the matching fork patch deliberately rather than carrying both
+implementations.
 
 ## Pi integration development
 
@@ -185,13 +198,15 @@ session. Keep these three artifacts distinct:
 3. the managed Pi extension written to
    `~/.pi/agent/extensions/herdr-agent-state.ts`.
 
-The running Herdr server may remain the normal upstream release because this
-patch does not change the socket protocol. Only the installer must come from the
-fork so it writes the version 9 Pi asset containing the `herdr:busy` listener
-and Ask lifecycle tracking.
+The automatic attention workflow runs in the Herdr server, so the active server
+and ordinary CLI must use the maintained fork. The Pi lifecycle patch also
+requires the fork binary as integration installer so it writes the version 9 Pi
+asset containing the `herdr:busy` listener and Ask lifecycle tracking.
+
 Build the fork from `/home/linkdevk/repos/herdr/master`. On this workstation,
-install the resulting standalone executable to `~/.local/bin/herdr`, then use
-that installed fork binary to refresh and inspect the managed Pi extension:
+install the resulting standalone executable to `~/.local/bin/herdr`, use that
+installed binary to refresh the managed Pi extension, and restart or live-hand
+off the server to that binary:
 
 ```bash
 cd /home/linkdevk/repos/herdr/master
@@ -199,6 +214,7 @@ cargo build
 install -m 755 target/debug/herdr ~/.local/bin/herdr
 ~/.local/bin/herdr integration install pi
 ~/.local/bin/herdr integration status
+~/.local/bin/herdr server restart
 ```
 
 Confirm the deployed asset rather than assuming that a fork checkout or build is
@@ -209,11 +225,12 @@ rg 'HERDR_INTEGRATION_VERSION=9|herdr:busy|tool_execution_start' \
   ~/.pi/agent/extensions/herdr-agent-state.ts
 ```
 
-An upstream Herdr binary embeds its own Pi asset. Running
-`herdr integration install pi` through that binary can replace the forked version
-with the upstream version, even while the server itself remains compatible.
-After Herdr updates or integration reinstalls, inspect the managed extension and
-reinstall it explicitly from the maintained fork when necessary.
+An upstream Herdr binary lacks the fork's automatic attention workflow and
+embeds its own Pi asset. Running `herdr integration install pi` through that
+binary can replace the forked integration, and starting it can replace the fork
+server. After Herdr updates, server handoffs, or integration reinstalls, verify
+the running executable and managed extension, then redeploy both from the
+maintained fork when necessary.
 
 ### Coordinated Pi cutover
 
