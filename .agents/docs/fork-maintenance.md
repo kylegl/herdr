@@ -190,8 +190,10 @@ while developing and `just check` before integrating changes into fork `master`.
 
 ## Runtime deployment model
 
-A checked-out or pushed fork is not automatically used by the running Herdr
-session. Keep these three artifacts distinct:
+A checked-out, tested, merged, or pushed fork is not automatically used by the
+running Herdr session. Fork work on this workstation is not complete until the
+installed binary and running server have been updated and verified. Keep these
+three artifacts distinct:
 
 1. the Herdr server and ordinary CLI binary currently on `PATH`;
 2. the fork binary used as the integration installer;
@@ -205,25 +207,39 @@ asset containing the `herdr:busy` listener and Ask lifecycle tracking.
 
 Build the fork from `/home/linkdevk/repos/herdr/master`. On this workstation,
 install the resulting standalone executable to `~/.local/bin/herdr`, use that
-installed binary to refresh the managed Pi extension, and restart or live-hand
-off the server to that binary:
+installed binary to refresh the managed Pi extension, and live-hand off the
+server to that binary so existing panes survive:
 
 ```bash
 cd /home/linkdevk/repos/herdr/master
-cargo build
-install -m 755 target/debug/herdr ~/.local/bin/herdr
+cargo build --release --locked
+install -m 755 target/release/herdr ~/.local/bin/herdr
 ~/.local/bin/herdr integration install pi
 ~/.local/bin/herdr integration status
-~/.local/bin/herdr server restart
+~/.local/bin/herdr server live-handoff --import-exe ~/.local/bin/herdr
 ```
 
-Confirm the deployed asset rather than assuming that a fork checkout or build is
+Do this after integrating fork-only runtime changes and after every upstream
+sync. Do not treat `cargo run`, a successful test, a pushed commit, or a current
+`target/debug/herdr` as deployment evidence. A later normal `herdr` launch uses
+`~/.local/bin/herdr`.
+
+Confirm both deployed artifacts rather than assuming that a checkout or build is
 active:
 
 ```bash
+cmp --silent target/release/herdr ~/.local/bin/herdr
+server_pid="$(fuser ~/.config/herdr/herdr.sock 2>/dev/null | awk '{print $1}')"
+cmp --silent "/proc/$server_pid/exe" ~/.local/bin/herdr
+herdr workspace list >/dev/null
 rg 'HERDR_INTEGRATION_VERSION=9|herdr:busy|tool_execution_start' \
   ~/.pi/agent/extensions/herdr-agent-state.ts
 ```
+
+Then start a new `herdr` client and live-test one fork-only behavior. For the
+automatic attention dock, leave an agent blocked or unseen-done for at least
+300 ms and verify that its real pane appears in the active tab. This runtime
+check is the final deployment gate.
 
 An upstream Herdr binary lacks the fork's automatic attention workflow and
 embeds its own Pi asset. Running `herdr integration install pi` through that

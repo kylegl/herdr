@@ -79,9 +79,11 @@ The manual `attention_dock.set` and `attention_dock.clear` API and context-menu 
      scripts.test_vendor_portable_pty
    ```
 
-8. Live-test one blocked and one background-done transition. Verify native wrapping/input, focus pinning, return on `working`, queue advancement, `prefix+o`, Handy/plugin targeting, stable sidebar labels/states, zoom restoration, and a live handoff while an entry is projected.
+8. Deploy the checked fork binary and integration using the runtime deployment procedure in [`fork-maintenance.md`](fork-maintenance.md). A checkout build or passing test suite does not update the normal `~/.local/bin/herdr` runtime.
 
-The merge is complete only when snapshots are semantically identical with and without a transient placement, a handoff preserves PTY ownership and queued attention, and no topology mutation can retain a displaced pane after attention state is lost.
+9. Live-test one blocked and one background-done transition against the installed binary. Verify native wrapping/input, focus pinning, return on `working`, queue advancement, `prefix+o`, Handy/plugin targeting, stable sidebar labels/states, zoom restoration, and a live handoff while an entry is projected.
+
+The merge is complete only when snapshots are semantically identical with and without a transient placement, a handoff preserves PTY ownership and queued attention, no topology mutation can retain a displaced pane after attention state is lost, and the installed binary passes the live attention check.
 
 ## Upstream overlap and removal
 
