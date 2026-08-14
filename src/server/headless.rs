@@ -4677,7 +4677,11 @@ impl HeadlessServer {
             changed = true;
         }
 
-        if self.app.state.reconcile_due_attention(now) {
+        if self
+            .app
+            .state
+            .reconcile_due_attention(now, &self.app.terminal_runtimes)
+        {
             changed = true;
         }
 

@@ -168,6 +168,13 @@ impl AppState {
     }
 
     pub(crate) fn reconcile_attention_dock(&mut self) {
+        self.reconcile_attention_dock_from(&TerminalRuntimeRegistry::new());
+    }
+
+    pub(crate) fn reconcile_attention_dock_from(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) {
         if self.attention_dock.reconcile_suspended
             || self.mode == crate::app::state::Mode::ContextMenu
         {
@@ -250,10 +257,10 @@ impl AppState {
             return;
         };
         let attention_home_workspace_id = self.workspaces[attention_home_ws_idx].id.clone();
-        let attention_home_workspace_name =
-            self.workspaces[attention_home_ws_idx].display_name_from_terminals(&self.terminals);
+        let attention_home_workspace_name = self.workspaces[attention_home_ws_idx]
+            .display_name_from(&self.terminals, terminal_runtimes);
         let dock_workspace_name =
-            self.workspaces[active_ws_idx].display_name_from_terminals(&self.terminals);
+            self.workspaces[active_ws_idx].display_name_from(&self.terminals, terminal_runtimes);
         let (anchor, direction, focused, dock_was_zoomed, cwd) = {
             let workspace = &self.workspaces[active_ws_idx];
             let tab = &workspace.tabs[dock_tab_idx];
@@ -601,7 +608,11 @@ impl AppState {
         }
     }
 
-    pub(crate) fn reconcile_due_attention(&mut self, now: Instant) -> bool {
+    pub(crate) fn reconcile_due_attention(
+        &mut self,
+        now: Instant,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> bool {
         let mut became_ready = false;
         for entry in &mut self.attention_dock.queue {
             if !entry.ready && entry.eligible_at <= now {
@@ -610,7 +621,7 @@ impl AppState {
             }
         }
         if became_ready {
-            self.reconcile_attention_dock();
+            self.reconcile_attention_dock_from(terminal_runtimes);
         }
         became_ready
     }
@@ -1122,14 +1133,17 @@ mod tests {
             AgentState::Working,
             true,
         );
-        assert!(!brief.reconcile_due_attention(Instant::now() + ATTENTION_DEBOUNCE));
+        assert!(!brief.reconcile_due_attention(
+            Instant::now() + ATTENTION_DEBOUNCE,
+            &TerminalRuntimeRegistry::new(),
+        ));
         assert!(brief.attention_dock.placement.is_none());
 
         let (mut stable, stable_pane) = state_with_attention();
         stable.attention_dock.queue[0].eligible_at = Instant::now() - ATTENTION_DEBOUNCE;
         stable.attention_dock.queue[0].ready = false;
-        assert!(stable.reconcile_due_attention(Instant::now()));
-        assert!(!stable.reconcile_due_attention(Instant::now()));
+        assert!(stable.reconcile_due_attention(Instant::now(), &TerminalRuntimeRegistry::new(),));
+        assert!(!stable.reconcile_due_attention(Instant::now(), &TerminalRuntimeRegistry::new(),));
         assert_eq!(stable.pane_location(stable_pane), Some((1, 0)));
     }
 
@@ -1155,6 +1169,74 @@ mod tests {
         );
         assert_eq!(state.workspace_display_name(&state.workspaces[1]), "work");
         state.assert_invariants_for_test();
+    }
+
+    #[tokio::test]
+    async fn attention_title_and_sidebar_use_live_source_cwd() {
+        let unique = format!(
+            "herdr-attention-runtime-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let stale_cwd = root.join("home-assistant-da");
+        let live_cwd = root.join("current-home");
+        std::fs::create_dir_all(&stale_cwd).unwrap();
+        std::fs::create_dir_all(&live_cwd).unwrap();
+
+        let (mut state, attention_pane) = state_with_attention();
+        state.workspaces[0].custom_name = None;
+        state.workspaces[0].identity_cwd = stale_cwd.clone();
+        let terminal_id = state.workspaces[0]
+            .terminal_id(attention_pane)
+            .cloned()
+            .unwrap();
+        state.terminals.get_mut(&terminal_id).unwrap().cwd = stale_cwd;
+        state.attention_dock.queue[0].ready = false;
+
+        let (events, _) = tokio::sync::mpsc::channel(4);
+        let runtime = crate::terminal::TerminalRuntime::spawn(
+            attention_pane,
+            24,
+            80,
+            live_cwd.clone(),
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            &crate::pane::PaneLaunchEnv::default(),
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while runtime.cwd() != Some(live_cwd.clone()) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        terminal_runtimes.insert(terminal_id, runtime);
+
+        state.reconcile_due_attention(Instant::now(), &terminal_runtimes);
+
+        assert_eq!(
+            state
+                .attention_dock_title_for_pane(attention_pane)
+                .as_deref(),
+            Some("WORKSPACE - current-home")
+        );
+        assert_eq!(
+            state.workspace_display_name_from(&state.workspaces[0], &terminal_runtimes),
+            "current-home"
+        );
+
+        for (_, runtime) in terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

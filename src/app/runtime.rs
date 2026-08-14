@@ -312,7 +312,10 @@ impl App {
             changed = true;
         }
 
-        if self.state.reconcile_due_attention(now) {
+        if self
+            .state
+            .reconcile_due_attention(now, &self.terminal_runtimes)
+        {
             changed = true;
         }
 
