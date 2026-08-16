@@ -124,12 +124,7 @@ impl AppState {
         seen: bool,
     ) {
         if state == AgentState::Working {
-            self.attention_dock
-                .queue
-                .retain(|entry| entry.pane_id != pane_id);
-            if self.attention_dock.presented_at_home == Some(pane_id) {
-                self.attention_dock.presented_at_home = None;
-            }
+            self.remove_attention_entry(pane_id);
             return;
         }
 
@@ -640,6 +635,15 @@ impl AppState {
                 (priority, entry.sequence)
             })
             .map(|entry| entry.pane_id)
+    }
+
+    pub(crate) fn remove_attention_entry(&mut self, pane_id: PaneId) {
+        self.attention_dock
+            .queue
+            .retain(|entry| entry.pane_id != pane_id);
+        if self.attention_dock.presented_at_home == Some(pane_id) {
+            self.attention_dock.presented_at_home = None;
+        }
     }
 
     fn prune_attention_state(&mut self) {

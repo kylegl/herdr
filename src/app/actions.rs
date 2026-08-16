@@ -3062,12 +3062,16 @@ impl AppState {
             agent_release_status: agent_released.then(|| pane_agent_status(change.state, seen)),
             suppress_completion,
         };
-        self.observe_attention_transition(
-            update.pane_id,
-            update.previous_state,
-            update.state,
-            update.seen,
-        );
+        if update.agent_released {
+            self.remove_attention_entry(update.pane_id);
+        } else {
+            self.observe_attention_transition(
+                update.pane_id,
+                update.previous_state,
+                update.state,
+                update.seen,
+            );
+        }
         Some(update)
     }
 
@@ -6015,6 +6019,33 @@ mod tests {
             state.toast.as_ref().map(|toast| toast.kind),
             Some(ToastKind::Finished)
         ));
+    }
+
+    #[test]
+    fn agent_process_exit_removes_the_attention_entry() {
+        let mut state = app_with_workspaces(&["home", "active"]);
+        state.active = Some(1);
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.terminal_id_for_pane(0, pane_id).unwrap();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Pi), AgentState::Working);
+        state.observe_attention_transition(pane_id, AgentState::Working, AgentState::Blocked, true);
+        state.make_attention_ready_for_test(pane_id);
+        state.reconcile_attention_dock();
+        assert_eq!(state.workspaces[1].tabs[0].layout.pane_count(), 2);
+
+        let update = state
+            .publish_pane_process_exit_if_agent(pane_id)
+            .expect("process exit update");
+        assert!(update.agent_released);
+        state.reconcile_attention_dock();
+
+        assert_eq!(state.workspaces[1].tabs[0].layout.pane_count(), 1);
+        assert!(state.workspaces[0].pane_state(pane_id).is_some());
     }
 
     #[test]
