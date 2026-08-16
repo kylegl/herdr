@@ -10,7 +10,7 @@ The attention dock is automatic server-owned coordination, not a designated work
 - A transition must remain `blocked` or `done` for 300 ms before it becomes eligible. Returning to `working` during that interval cancels it.
 - The queue head is physically exchanged into a transient tiled split in the active tab. The real pane and PTY move; there is no mirrored terminal renderer.
 - Placement is right of a single pane, below the right pane for two side-by-side panes, and right of the southeast pane otherwise.
-- The split does not steal focus. A focused attention pane remains pinned while its entry is queued, so input cannot be redirected. `working` removes the entry even while focused.
+- The split does not steal focus. A focused attention pane remains pinned while its entry is queued, so input cannot be redirected. `working` or agent exit removes the entry even while focused.
 - Viewing or focusing does not acknowledge an entry. `prefix+o` restores and follows the focused attention pane home without resolving it.
 - An agent already visible in the active tab is not duplicated.
 - The border title is `WORKSPACE - <home workspace name>`. Workspace names and aggregate states remain attributed to canonical homes while panes are exchanged.
