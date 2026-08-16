@@ -73,7 +73,7 @@ Herdr injects the caller's context into each managed pane:
 printf '%s\n' "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID"
 ```
 
-Prefer `--current` when a pane command should target the calling pane. Omitting a target may use the UI-focused pane, which can belong to the user or another client.
+For pane commands that accept it, prefer `--current` when targeting the calling pane. Other pane commands require a positional pane ID; for example, read the calling pane with `herdr pane read "$HERDR_PANE_ID"`. Omitting a supported target may use the UI-focused pane, which can belong to the user or another client.
 
 Discover live state with:
 
@@ -187,7 +187,7 @@ After that failed read, ask the agent to write its complete response as Markdown
 ## Safety and coordination rules
 
 - Use `--no-focus` for background work unless the user asked to switch context.
-- Use `--current`, an explicit pane ID, or a unique agent name. Do not rely on another client's focused pane.
+- Use `--current` only when the command's help lists it; otherwise pass an explicit pane ID or unique agent name. Do not rely on another client's focused pane.
 - Parse IDs from JSON responses. Do not derive them from sidebar order or examples.
 - Do not close workspaces, tabs, panes, or sessions you did not create unless the user explicitly asked.
 - Never run `herdr server stop` from an active session unless the user explicitly intends to stop the server and its pane processes.
