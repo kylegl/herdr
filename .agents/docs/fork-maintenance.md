@@ -70,10 +70,17 @@ Push task branches only to the fork:
 git push -u origin fork/<short-task-name>
 ```
 
-If a pull request is used, its base must be `kylegl/herdr:master`. Opening a PR,
-issue, discussion, or branch against `herdrdev/herdr` is a separate upstream
-contribution workflow and requires explicit user direction plus Herdr's
-external-contributor process.
+If a pull request is used, pin the GitHub CLI repository explicitly and target
+fork `master`:
+
+```bash
+gh pr create --repo kylegl/herdr --base master
+```
+
+Do not export `GH_REPO` globally; an explicitly approved upstream contribution
+uses a different repository. Opening a PR, issue, discussion, or branch against
+`herdrdev/herdr` is a separate upstream contribution workflow and requires
+explicit user direction plus Herdr's external-contributor process.
 
 ### Integrating fork-only work
 

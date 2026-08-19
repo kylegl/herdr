@@ -20,7 +20,7 @@ When it applies, establish the structural picture from the graph before broad so
 
 - Follow the skill's freshness and evidence workflow.
 - Use graph findings to select files and symbols for targeted source inspection; use text search to verify findings and cover graph gaps.
-- Before proposing or making structural changes, read `.agents/CONTEXT.md` and relevant ADRs.
+- Before proposing or making structural changes, read `.agents/CONTEXT.md` when it exists and relevant ADRs.
 - Treat structural conclusions as complete only when material graph findings are verified against source and any freshness or coverage limits are stated.
 
 Terminal based agent runtime for coding agents.
@@ -37,7 +37,9 @@ This checkout is the maintained `kylegl/herdr` fork when `origin` resolves to
   approved workflow under the external-contributor rules below.
 - Fork `master` carries maintained Pi lifecycle and automatic attention-dock
   patches. Start work on a task branch from `master`, push it only to `origin`,
-  and target pull requests at `kylegl/herdr:master`.
+  and target pull requests at `kylegl/herdr:master`. Pin GitHub CLI operations
+  to the fork with `--repo kylegl/herdr`; do not set `GH_REPO` globally because
+  explicitly approved upstream work uses a different repository.
 - Keep the fork current by merging `upstream/master` into fork `master`; do not
   rebase or force-push published fork history.
 - Before editing or pushing, run `scripts/fork-preflight.sh`. Stop if it reports
