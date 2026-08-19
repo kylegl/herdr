@@ -1,9 +1,16 @@
 # herdr task runner
 
+python := env_var_or_default("PYTHON", "python3")
+
+# Verify the selected maintenance Python before running Python-backed checks
+[private]
+python-preflight:
+    {{quote(python)}} -c 'import sys; required = (3, 11); current = sys.version_info[:2]; current >= required or sys.exit(f"error: maintenance Python >=3.11 required, but {sys.executable} is {current[0]}.{current[1]}; set PYTHON to a compatible executable")'
+
 # Run tests
-test:
+test: python-preflight
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+    {{quote(python)}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
     just ui-hot-path-architecture-test
     just integration-assets-test
     just plugin-marketplace-test
@@ -13,8 +20,8 @@ test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
 # Enforce deterministic UI hot-path architecture boundaries
-ui-hot-path-architecture-test:
-    python3 -m unittest scripts.test_ui_hot_path_architecture
+ui-hot-path-architecture-test: python-preflight
+    {{quote(python)}} -m unittest scripts.test_ui_hot_path_architecture
 
 # Run fast local lint checks
 [unix]
@@ -43,8 +50,8 @@ windows-lint:
 
 # Check formatting + run unit tests + Windows target lint + maintenance script tests
 [unix]
-check: ci windows-lint
-    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+check: python-preflight ci windows-lint
+    {{quote(python)}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
 [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
@@ -86,9 +93,9 @@ build-libghostty-vt:
     scripts/build_vendored_libghostty_vt.sh
 
 # Check that release docs and changelog have been finalized from docs/next before release
-release-docs-check:
-    python3 scripts/agent_detection_manifest_check.py --require-website
-    python3 scripts/config_reference_check.py
+release-docs-check: python-preflight
+    {{quote(python)}} scripts/agent_detection_manifest_check.py --require-website
+    {{quote(python)}} scripts/config_reference_check.py
     node website/scripts/docs-versions.mjs check
     node website/scripts/docs-preview.mjs check
     @test -f docs/next/README.md
@@ -120,7 +127,7 @@ release-docs-check:
             exit 1; \
         fi; \
     done
-    python3 scripts/docs_translation_parity.py --docs-root docs/next/website/src/content/docs
+    {{quote(python)}} scripts/docs_translation_parity.py --docs-root docs/next/website/src/content/docs
     just website-build
     cd website && bun run build:draft
 
@@ -131,7 +138,7 @@ pre-release-check:
     @echo "release review required: investigate material render-scaling regressions before publishing."
 
 # Prepare the release commit without tagging or pushing (usage: just release-prepare 0.1.1)
-release-prepare version:
+release-prepare version: python-preflight
     @printf '%s\n' '{{version}}' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { \
         echo "error: version must look like 0.6.6 without a v prefix"; \
         exit 1; \
@@ -146,7 +153,7 @@ release-prepare version:
         exit 1; \
     fi
     just pre-release-check
-    python3 scripts/changelog.py prepare --version {{version}}
+    {{quote(python)}} scripts/changelog.py prepare --version {{version}}
     cp CHANGELOG.md docs/next/CHANGELOG.md
     sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
     cargo update -p herdr --offline
@@ -156,7 +163,7 @@ release-prepare version:
     @echo "v{{version}} release commit prepared. Review it, then run: just release-publish {{version}}"
 
 # Tag and push an already-prepared release commit (usage: just release-publish 0.1.1)
-release-publish version:
+release-publish version: python-preflight
     @printf '%s\n' '{{version}}' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { \
         echo "error: version must look like 0.6.6 without a v prefix"; \
         exit 1; \
@@ -181,7 +188,7 @@ release-publish version:
         exit 1; \
     fi
     just release-docs-check
-    python3 scripts/changelog.py extract --version {{version}} --output /tmp/herdr-release-notes-check.md
+    {{quote(python)}} scripts/changelog.py extract --version {{version}} --output /tmp/herdr-release-notes-check.md
     rm -f /tmp/herdr-release-notes-check.md
     @local_head="$(git rev-parse HEAD)"; \
     remote_head="$(git rev-parse origin/master)"; \
