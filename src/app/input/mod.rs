@@ -424,6 +424,10 @@ impl App {
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
                     }
                     MouseAction::FocusToastTarget => self.focus_toast_target_via_api(),
+                    MouseAction::DismissAttention => {
+                        self.state
+                            .dismiss_docked_attention_from(&self.terminal_runtimes);
+                    }
                     MouseAction::MoveWorkspace {
                         source_ws_idx,
                         insert_idx,

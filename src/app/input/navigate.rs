@@ -504,6 +504,13 @@ impl App {
                     leave_navigate_mode(&mut self.state);
                 }
             }
+            NavigateAction::DismissAttention => {
+                self.state
+                    .dismiss_docked_attention_from(&self.terminal_runtimes);
+                if self.state.mode == Mode::Navigate {
+                    leave_navigate_mode(&mut self.state);
+                }
+            }
             NavigateAction::Detach => {
                 super::modal::request_detach(&mut self.state);
                 leave_navigate_mode(&mut self.state);
@@ -1591,6 +1598,7 @@ pub(crate) enum NavigateAction {
     Settings,
     ReloadConfig,
     OpenNotificationTarget,
+    DismissAttention,
     Detach,
     OpenNavigator,
 }
@@ -1615,6 +1623,7 @@ fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
             | NavigateAction::CyclePanePrevious
             | NavigateAction::LastPane
             | NavigateAction::OpenNotificationTarget
+            | NavigateAction::DismissAttention
     )
 }
 
@@ -1739,6 +1748,7 @@ fn non_indexed_action_for_key(
             &kb.open_notification_target,
             NavigateAction::OpenNotificationTarget,
         ),
+        (&kb.dismiss_attention, NavigateAction::DismissAttention),
         (&kb.detach, NavigateAction::Detach),
         (&kb.goto, NavigateAction::OpenNavigator),
     ] {
@@ -2015,6 +2025,12 @@ pub(super) fn execute_navigate_action_in_context(
             if !state.open_docked_attention() {
                 state.focus_toast_target();
             }
+            if state.mode == Mode::Navigate {
+                leave_navigate_mode(state);
+            }
+        }
+        NavigateAction::DismissAttention => {
+            state.dismiss_docked_attention_from(terminal_runtimes);
             if state.mode == Mode::Navigate {
                 leave_navigate_mode(state);
             }
@@ -2767,6 +2783,36 @@ mod tests {
             app.state.workspaces[0].focused_pane_id(),
             Some(attention_pane)
         );
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn dismiss_attention_binding_advances_to_next_docked_agent() {
+        let mut app = app_with_test_workspaces(&["first", "second", "work"]);
+        let first_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let second_pane = app.state.workspaces[1].tabs[0].root_pane;
+        app.state.ensure_test_terminals();
+        app.state.active = Some(2);
+        app.state.selected = 2;
+        app.state.keybinds.dismiss_attention = crate::config::ActionKeybinds::prefix("d");
+        for pane_id in [first_pane, second_pane] {
+            app.state.observe_attention_transition(
+                pane_id,
+                crate::detect::AgentState::Working,
+                crate::detect::AgentState::Blocked,
+                true,
+            );
+            app.state.make_attention_ready_for_test(pane_id);
+        }
+        app.state.reconcile_attention_dock();
+        app.state.mode = Mode::Prefix;
+
+        app.handle_prefix_key(TerminalKey::new(KeyCode::Char('d'), KeyModifiers::empty()));
+
+        assert!(app.state.workspaces[0].tabs[0]
+            .panes
+            .contains_key(&first_pane));
+        assert_eq!(app.state.docked_attention_pane(), Some(second_pane));
         assert_eq!(app.state.mode, Mode::Terminal);
     }
 

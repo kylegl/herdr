@@ -319,6 +319,7 @@ pub struct Keybinds {
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
     pub open_notification_target: ActionKeybinds,
+    pub dismiss_attention: ActionKeybinds,
     pub previous_workspace: ActionKeybinds,
     pub next_workspace: ActionKeybinds,
     pub previous_agent: ActionKeybinds,
@@ -487,6 +488,7 @@ impl Config {
             detach: empty_action!(),
             reload_config: empty_action!(),
             open_notification_target: empty_action!(),
+            dismiss_attention: empty_action!(),
             previous_workspace: empty_action!(),
             next_workspace: empty_action!(),
             previous_agent: empty_action!(),
@@ -619,6 +621,7 @@ impl Config {
                 open_notification_target,
                 source
             );
+            apply_action!(keybinds.dismiss_attention, dismiss_attention, source);
             apply_action!(keybinds.previous_workspace, previous_workspace, source);
             apply_action!(keybinds.next_workspace, next_workspace, source);
             apply_action!(keybinds.previous_agent, previous_agent, source);
@@ -1586,6 +1589,18 @@ next_tab = "prefix+n"
             vec![BindingTrigger::Prefix((
                 KeyCode::Char('g'),
                 KeyModifiers::empty()
+            ))]
+        );
+    }
+
+    #[test]
+    fn dismiss_attention_defaults_to_prefix_shift_o() {
+        let kb = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&kb.dismiss_attention),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('o'),
+                KeyModifiers::SHIFT
             ))]
         );
     }

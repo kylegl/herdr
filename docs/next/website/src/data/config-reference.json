@@ -362,6 +362,12 @@
           "description": "Focus the currently visible notification target."
         },
         {
+          "key": "keys.dismiss_attention",
+          "type": "keybinding",
+          "default": "\"prefix+shift+o\"",
+          "description": "Dismiss the current attention dock item and present the next one."
+        },
+        {
           "key": "keys.previous_workspace",
           "type": "keybinding",
           "default": "unset",

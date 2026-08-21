@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Attention dock items can now be dismissed for their current attention occurrence from the pane border or with `prefix+shift+o`, allowing the next queued session to appear without muting future attention from the dismissed session.
+
 ### Fixed
 - Retained mouse selections now copy when Ctrl+C or Cmd+C arrives before a delayed mouse release instead of forwarding the copy shortcut to the pane. (#3100, thanks @moret)
 - Removing a background worktree workspace no longer changes focus to its parent workspace. (#3098)

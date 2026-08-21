@@ -72,6 +72,7 @@ struct DockPlacement {
 #[derive(Debug, Default)]
 pub(crate) struct AttentionDockState {
     queue: Vec<AttentionEntry>,
+    dismissed: std::collections::HashSet<PaneId>,
     placement: Option<DockPlacement>,
     presented_at_home: Option<PaneId>,
     reconcile_suspended: bool,
@@ -81,12 +82,16 @@ pub(crate) struct AttentionDockState {
 impl AppState {
     #[cfg(any(unix, test))]
     pub(crate) fn rebuild_attention_queue_after_handoff(&mut self) {
+        let dismissed = std::mem::take(&mut self.attention_dock.dismissed);
         let mut candidates = self
             .workspaces
             .iter()
             .flat_map(|workspace| &workspace.tabs)
             .flat_map(|tab| tab.panes.iter())
             .filter_map(|(pane_id, pane)| {
+                if dismissed.contains(pane_id) {
+                    return None;
+                }
                 let terminal = self.terminals.get(&pane.attached_terminal_id)?;
                 let kind = match (terminal.state, pane.seen) {
                     (AgentState::Blocked, _) => AttentionKind::Blocked,
@@ -102,7 +107,10 @@ impl AppState {
             .collect::<Vec<_>>();
         candidates.sort_by_key(|(_, _, sequence)| *sequence);
 
-        self.attention_dock = AttentionDockState::default();
+        self.attention_dock = AttentionDockState {
+            dismissed,
+            ..AttentionDockState::default()
+        };
         let eligible_at = Instant::now() + ATTENTION_DEBOUNCE;
         for (pane_id, kind, _) in candidates {
             self.attention_dock.next_sequence += 1;
@@ -124,7 +132,11 @@ impl AppState {
         seen: bool,
     ) {
         if state == AgentState::Working {
+            self.attention_dock.dismissed.remove(&pane_id);
             self.remove_attention_entry(pane_id);
+            return;
+        }
+        if self.attention_dock.dismissed.contains(&pane_id) {
             return;
         }
 
@@ -311,6 +323,36 @@ impl AppState {
             dock_focus_before_attention: focused,
             cross_workspace_identity,
         });
+    }
+
+    pub(crate) fn dismiss_docked_attention_from(
+        &mut self,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> bool {
+        let Some(attention_pane) = self
+            .attention_dock
+            .placement
+            .as_ref()
+            .map(|placement| placement.attention_pane)
+        else {
+            return false;
+        };
+
+        self.undock_attention();
+        if self.attention_dock.placement.is_some() {
+            return false;
+        }
+        self.attention_dock.dismissed.insert(attention_pane);
+        self.remove_attention_entry(attention_pane);
+        self.reconcile_attention_dock_from(terminal_runtimes);
+        true
+    }
+
+    pub(crate) fn docked_attention_pane(&self) -> Option<PaneId> {
+        self.attention_dock
+            .placement
+            .as_ref()
+            .map(|placement| placement.attention_pane)
     }
 
     pub(crate) fn open_docked_attention(&mut self) -> bool {
@@ -567,6 +609,10 @@ impl AppState {
         for entry in &self.attention_dock.queue {
             assert!(queued.insert(entry.pane_id), "attention pane queued twice");
             assert!(
+                !self.attention_dock.dismissed.contains(&entry.pane_id),
+                "dismissed attention pane remains queued"
+            );
+            assert!(
                 self.pane_location(entry.pane_id).is_some(),
                 "queued attention pane is not live"
             );
@@ -656,6 +702,9 @@ impl AppState {
         self.attention_dock
             .queue
             .retain(|entry| live_panes.contains(&entry.pane_id));
+        self.attention_dock
+            .dismissed
+            .retain(|pane_id| live_panes.contains(pane_id));
     }
 
     fn undock_attention(&mut self) {
@@ -1124,6 +1173,18 @@ mod tests {
     }
 
     #[test]
+    fn handoff_keeps_dismissed_attention_suppressed() {
+        let (mut state, attention_pane) = state_with_attention();
+        state.reconcile_attention_dock();
+        assert!(state.dismiss_docked_attention_from(&TerminalRuntimeRegistry::new()));
+
+        state.rebuild_attention_queue_after_handoff();
+
+        assert!(state.attention_dock.queue.is_empty());
+        assert!(state.attention_dock.dismissed.contains(&attention_pane));
+    }
+
+    #[test]
     fn attention_waits_for_a_stable_state_before_projecting() {
         let (mut brief, brief_pane) = state_with_attention();
         brief.attention_dock.queue[0].eligible_at = Instant::now() + ATTENTION_DEBOUNCE;
@@ -1149,6 +1210,79 @@ mod tests {
         assert!(stable.reconcile_due_attention(Instant::now(), &TerminalRuntimeRegistry::new(),));
         assert!(!stable.reconcile_due_attention(Instant::now(), &TerminalRuntimeRegistry::new(),));
         assert_eq!(stable.pane_location(stable_pane), Some((1, 0)));
+    }
+
+    #[test]
+    fn dismissing_attention_advances_and_allows_a_later_attention_cycle() {
+        let first_home = Workspace::test_new("first-attention-home");
+        let first_pane = first_home.tabs[0].root_pane;
+        let second_home = Workspace::test_new("second-attention-home");
+        let second_pane = second_home.tabs[0].root_pane;
+        let work = Workspace::test_new("work");
+        let mut state = AppState::test_new();
+        state.workspaces = vec![first_home, second_home, work];
+        state.ensure_test_terminals();
+        state.active = Some(2);
+        state.selected = 2;
+        state.mode = Mode::Terminal;
+        for pane_id in [first_pane, second_pane] {
+            state.observe_attention_transition(
+                pane_id,
+                AgentState::Working,
+                AgentState::Blocked,
+                true,
+            );
+            state.make_attention_ready_for_test(pane_id);
+        }
+        state.reconcile_attention_dock();
+
+        assert_eq!(state.docked_attention_pane(), Some(first_pane));
+        assert!(state.dismiss_docked_attention_from(&TerminalRuntimeRegistry::new()));
+        assert_eq!(state.pane_location(first_pane), Some((0, 0)));
+        assert_eq!(state.docked_attention_pane(), Some(second_pane));
+        assert!(!state
+            .attention_dock
+            .queue
+            .iter()
+            .any(|entry| entry.pane_id == first_pane));
+        state.observe_attention_transition(
+            first_pane,
+            AgentState::Blocked,
+            AgentState::Blocked,
+            true,
+        );
+        assert!(!state
+            .attention_dock
+            .queue
+            .iter()
+            .any(|entry| entry.pane_id == first_pane));
+
+        state.observe_attention_transition(
+            first_pane,
+            AgentState::Blocked,
+            AgentState::Working,
+            true,
+        );
+        state.observe_attention_transition(
+            first_pane,
+            AgentState::Working,
+            AgentState::Blocked,
+            true,
+        );
+        state.make_attention_ready_for_test(first_pane);
+        assert!(state
+            .attention_dock
+            .queue
+            .iter()
+            .any(|entry| entry.pane_id == first_pane));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn dismissing_without_visible_attention_is_a_noop() {
+        let mut state = AppState::test_new();
+
+        assert!(!state.dismiss_docked_attention_from(&TerminalRuntimeRegistry::new()));
     }
 
     #[test]

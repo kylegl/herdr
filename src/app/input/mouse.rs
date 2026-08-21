@@ -39,6 +39,7 @@ pub(super) enum MouseAction {
         pane_id: crate::layout::PaneId,
     },
     FocusToastTarget,
+    DismissAttention,
     MoveWorkspace {
         source_ws_idx: usize,
         insert_idx: usize,
@@ -120,6 +121,16 @@ impl AppState {
             && self.clickable_toast_at(mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
         {
+            return None;
+        }
+
+        let attention_dismiss_hit = self.mode == Mode::Terminal
+            && crate::ui::attention_dismiss_button_rect(self, &self.view.pane_infos)
+                .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row));
+        if attention_dismiss_hit && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return Some(MouseAction::DismissAttention);
+        }
+        if attention_dismiss_hit && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
             return None;
         }
 
@@ -3291,6 +3302,42 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Moved, menu.x + 2, menu.y + 2));
 
         assert_eq!(app.state.context_menu.unwrap().list.highlighted, 1);
+    }
+
+    #[test]
+    fn clicking_attention_dismiss_button_removes_current_queue_entry() {
+        let mut app = app_for_mouse_test();
+        let home = Workspace::test_new("attention-home");
+        let attention_pane = home.tabs[0].root_pane;
+        let work = Workspace::test_new("work");
+        app.state.workspaces = vec![home, work];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.mode = Mode::Terminal;
+        app.state.observe_attention_transition(
+            attention_pane,
+            AgentState::Working,
+            AgentState::Blocked,
+            true,
+        );
+        app.state.make_attention_ready_for_test(attention_pane);
+        app.state.reconcile_attention_dock();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 32));
+        let button =
+            crate::ui::attention_dismiss_button_rect(&app.state, &app.state.view.pane_infos)
+                .expect("dismiss button");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x,
+            button.y,
+        ));
+
+        assert_eq!(app.state.docked_attention_pane(), None);
+        assert!(app.state.workspaces[0].tabs[0]
+            .panes
+            .contains_key(&attention_pane));
     }
 
     #[test]
