@@ -3,9 +3,14 @@
 ## Unreleased
 
 ### Fixed
+- Retained mouse selections now copy when Ctrl+C or Cmd+C arrives before a delayed mouse release instead of forwarding the copy shortcut to the pane. (#3100, thanks @moret)
+- Removing a background worktree workspace no longer changes focus to its parent workspace. (#3098)
+- Prefix bindings such as `prefix+|` now recognize characters produced by macOS Option and custom keyboard layouts, while exact chords such as `prefix+alt+w` keep priority. (#3079, thanks @vlcinsky)
+- Direct terminal attaches now preserve multiline pastes as one paste instead of submitting each line separately. (#3054)
 - Windows panes now keep bare `cursor-agent` launches detected after Cursor hands off to its bundled Node process. (#3032)
 - Oversized Kitty images no longer prevent smaller images shown later in the same pane from rendering. (#3033)
 - Claude Code panes now use visible turn, background shell, and background agent activity as working-state fallbacks when OSC titles are unavailable or disabled. (#1630, #2241)
+- Claude Code panes now remain working while MCP tasks continue in the background after a turn ends. (#3090)
 - Tab bar status commands now remove ESC-prefixed terminal control sequences instead of displaying their sequence bodies as text. (#3001)
 - Unix plugin pane commands now default `PWD` to their resolved working directory, so direct popup tools open at explicit `--cwd` paths while preserving caller-provided `PWD` values. (#2984)
 
