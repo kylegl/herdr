@@ -364,6 +364,18 @@ impl AppState {
             return false;
         }
 
+        self.restore_and_follow_docked_attention(placement)
+    }
+
+    pub(crate) fn follow_docked_attention_home(&mut self) -> bool {
+        let Some(placement) = self.attention_dock.placement.clone() else {
+            return false;
+        };
+
+        self.restore_and_follow_docked_attention(placement)
+    }
+
+    fn restore_and_follow_docked_attention(&mut self, placement: DockPlacement) -> bool {
         let attention_pane = placement.attention_pane;
         self.undock_attention();
         if let Some((dock_ws_idx, dock_tab_idx)) =

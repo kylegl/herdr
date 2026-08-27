@@ -134,6 +134,17 @@ impl AppState {
             return None;
         }
 
+        let attention_title_hit = self.mode == Mode::Terminal
+            && crate::ui::attention_title_button_rect(self, &self.view.pane_infos)
+                .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row));
+        if attention_title_hit && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.follow_docked_attention_home();
+            return None;
+        }
+        if attention_title_hit && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+            return None;
+        }
+
         if self.mode == Mode::Settings {
             return self.handle_settings_mouse(mouse).map(MouseAction::Settings);
         }
@@ -3338,6 +3349,51 @@ mod tests {
         assert!(app.state.workspaces[0].tabs[0]
             .panes
             .contains_key(&attention_pane));
+    }
+
+    #[test]
+    fn clicking_attention_title_follows_pane_to_its_home_workspace() {
+        let mut app = app_for_mouse_test();
+        let home = Workspace::test_new("attention-home");
+        let attention_pane = home.tabs[0].root_pane;
+        let work = Workspace::test_new("work");
+        let work_pane = work.tabs[0].root_pane;
+        app.state.workspaces = vec![home, work];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        app.state.mode = Mode::Terminal;
+        app.state.observe_attention_transition(
+            attention_pane,
+            AgentState::Working,
+            AgentState::Blocked,
+            true,
+        );
+        app.state.make_attention_ready_for_test(attention_pane);
+        app.state.reconcile_attention_dock();
+        assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(work_pane));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 32));
+        let title = crate::ui::attention_title_button_rect(&app.state, &app.state.view.pane_infos)
+            .expect("attention title");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            title.x,
+            title.y,
+        ));
+
+        assert_eq!(app.state.active, Some(0));
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(attention_pane)
+        );
+        assert_eq!(app.state.docked_attention_pane(), None);
+        app.state.assert_invariants_for_test();
+
+        app.state.switch_workspace(1);
+        app.state.reconcile_attention_dock();
+
+        assert_eq!(app.state.docked_attention_pane(), Some(attention_pane));
     }
 
     #[test]

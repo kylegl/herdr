@@ -7,9 +7,7 @@ use ratatui::{
 };
 
 use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
-#[cfg(test)]
-use super::text::display_width;
-use super::text::truncate_end;
+use super::text::{display_width, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::app::state::Palette;
 use crate::app::{AppState, Mode};
@@ -42,6 +40,12 @@ pub(crate) fn attention_dismiss_button_rect(
     attention_dismiss_button_rect_for_info(app, info)
 }
 
+pub(crate) fn attention_title_button_rect(app: &AppState, pane_infos: &[PaneInfo]) -> Option<Rect> {
+    let pane_id = app.docked_attention_pane()?;
+    let info = pane_infos.iter().find(|info| info.id == pane_id)?;
+    attention_title_button_rect_for_info(app, info)
+}
+
 fn attention_dismiss_button_rect_for_info(app: &AppState, info: &PaneInfo) -> Option<Rect> {
     if app.docked_attention_pane() != Some(info.id) || !info.borders.contains(Borders::TOP) {
         return None;
@@ -60,6 +64,25 @@ fn attention_dismiss_button_rect_for_info(app: &AppState, info: &PaneInfo) -> Op
         width,
         1,
     ))
+}
+
+fn attention_title_button_rect_for_info(app: &AppState, info: &PaneInfo) -> Option<Rect> {
+    if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
+        return None;
+    }
+    let label = app.attention_dock_title_for_pane(info.id)?;
+    let title = pane_border_title(&label, info.rect.width, info.is_focused)?;
+    let start_x = info.rect.x.saturating_add(1);
+    let end_x = attention_dismiss_button_rect_for_info(app, info)
+        .map(|button| button.x.saturating_sub(1))
+        .unwrap_or_else(|| {
+            info.rect
+                .x
+                .saturating_add(info.rect.width)
+                .saturating_sub(1)
+        });
+    let width = (display_width(&title) as u16).min(end_x.saturating_sub(start_x));
+    (width > 0).then(|| Rect::new(start_x, info.rect.y, width, 1))
 }
 
 // Full view computation reaches this helper for active and background panes.
@@ -695,7 +718,9 @@ fn render_pane_border_titles(
         if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
             continue;
         }
-        let label = app.attention_dock_title_for_pane(info.id).or_else(|| {
+        let attention_title = app.attention_dock_title_for_pane(info.id);
+        let is_attention_title = attention_title.is_some();
+        let label = attention_title.or_else(|| {
             ws.pane_state(info.id)
                 .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
                 .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
@@ -728,13 +753,13 @@ fn render_pane_border_titles(
             continue;
         }
         let visually_focused = info.is_focused && app.sidebar_navigation.is_none();
-        let color = if visually_focused {
+        let color = if visually_focused || is_attention_title {
             app.palette.accent
         } else {
             app.palette.overlay0
         };
         let mut style = Style::default().fg(color);
-        if visually_focused {
+        if visually_focused || is_attention_title {
             style = style.add_modifier(Modifier::BOLD);
         }
         buf.set_stringn(
