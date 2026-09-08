@@ -3357,8 +3357,12 @@ impl HeadlessServer {
                 for delivery in &deliveries {
                     self.forward_agent_notification_delivery(delivery);
                 }
-                changed = true;
             }
+            // The attention debounce may have elapsed while notification delivery blocked it.
+            self.app
+                .state
+                .reconcile_attention_dock_from(&self.app.terminal_runtimes);
+            changed = true;
         }
 
         if self.has_app_client() {

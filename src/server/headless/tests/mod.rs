@@ -1,5 +1,7 @@
 use super::*;
 
+mod attention_notifications;
+
 #[path = "pane_graphics.rs"]
 mod pane_graphics_tests;
 #[path = "surface_interest.rs"]
