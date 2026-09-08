@@ -30,6 +30,28 @@ pub(crate) const MAX_REPLAY_BYTES_PER_PANE: usize = 8 * 1024;
 pub(crate) const COMMIT_TIMEOUT: Duration = READY_TIMEOUT;
 
 #[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HandoffAttentionKind {
+    Blocked,
+    Done,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct HandoffAttentionEntry {
+    pub source_pane_id: String,
+    pub kind: HandoffAttentionKind,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) struct HandoffAttentionState {
+    pub queue: Vec<HandoffAttentionEntry>,
+    pub dismissed_source_pane_ids: Vec<String>,
+}
+
+#[cfg(unix)]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct HandoffManifest {
     pub version: u32,
@@ -44,6 +66,10 @@ pub(crate) struct HandoffManifest {
     /// Absent from manifests written before this field existed.
     #[serde(default)]
     pub api_window_title: Option<String>,
+    /// Queue order, blocked/done kind, and dismissal state are runtime-only and therefore travel
+    /// only across live handoff. Older senders omit this field and use destination-side rebuild.
+    #[serde(default)]
+    pub attention: Option<HandoffAttentionState>,
 }
 
 #[cfg(unix)]
@@ -310,6 +336,7 @@ pub(crate) fn manifest_for(
     expected_protocol: Option<u32>,
     expected_version: Option<String>,
     api_window_title: Option<String>,
+    attention: Option<HandoffAttentionState>,
 ) -> HandoffManifest {
     HandoffManifest {
         version: HANDOFF_VERSION,
@@ -320,6 +347,7 @@ pub(crate) fn manifest_for(
         snapshot,
         panes,
         api_window_title,
+        attention,
     }
 }
 
@@ -496,6 +524,7 @@ mod tests {
             None,
             None,
             Some("deploying".to_string()),
+            None,
         );
 
         assert_eq!(manifest.api_window_title.as_deref(), Some("deploying"));
@@ -509,6 +538,7 @@ mod tests {
             None,
             None,
             Some("deploying".to_string()),
+            None,
         );
         let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
         value
@@ -520,5 +550,33 @@ mod tests {
             serde_json::from_value(value).expect("an older manifest should still load");
 
         assert!(older.api_window_title.is_none());
+    }
+
+    #[test]
+    fn a_manifest_written_before_attention_metadata_still_loads() {
+        let manifest = manifest_for(
+            empty_snapshot(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            Some(HandoffAttentionState {
+                queue: vec![HandoffAttentionEntry {
+                    source_pane_id: "pane_source".into(),
+                    kind: HandoffAttentionKind::Done,
+                }],
+                dismissed_source_pane_ids: vec!["pane_dismissed".into()],
+            }),
+        );
+        let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
+        value
+            .as_object_mut()
+            .expect("manifest should be a json object")
+            .remove("attention");
+
+        let older: HandoffManifest =
+            serde_json::from_value(value).expect("an older manifest should still load");
+
+        assert!(older.attention.is_none());
     }
 }

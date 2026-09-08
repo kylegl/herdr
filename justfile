@@ -1,27 +1,28 @@
 # herdr task runner
+set windows-shell := ["cmd.exe", "/d", "/s", "/c"]
 
-python := env_var_or_default("PYTHON", "python3")
-
-# Verify the selected maintenance Python before running Python-backed checks
-[private]
-python-preflight:
-    {{quote(python)}} -c 'import sys; required = (3, 11); current = sys.version_info[:2]; current >= required or sys.exit(f"error: maintenance Python >=3.11 required, but {sys.executable} is {current[0]}.{current[1]}; set PYTHON to a compatible executable")'
+python := if os() == "windows" { "python" } else { "python3" }
 
 # Run tests
-test: python-preflight
+test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    {{quote(python)}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+    just maintenance-test
     just ui-hot-path-architecture-test
     just integration-assets-test
     just plugin-marketplace-test
+    just docs-contract-test
+
+# Run repository maintenance contract tests
+maintenance-test:
+    {{python}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
     cargo nextest run --locked "{{filter}}" --status-level fail --final-status-level fail --failure-output final --success-output never
 
 # Enforce deterministic UI hot-path architecture boundaries
-ui-hot-path-architecture-test: python-preflight
-    {{quote(python)}} -m unittest scripts.test_ui_hot_path_architecture
+ui-hot-path-architecture-test:
+    {{python}} -m unittest scripts.test_ui_hot_path_architecture
 
 # Run fast local lint checks
 [unix]
@@ -35,9 +36,9 @@ lint:
     & .\scripts\windows_check.ps1 -Mode lint
 
 # Run PR CI checks
-[unix]
 ci filter='all()': lint
     cargo nextest run --locked -E "{{filter}}" --status-level fail --final-status-level slow --failure-output final --success-output never
+    just maintenance-test
     just ui-hot-path-architecture-test
     just integration-assets-test
     just plugin-marketplace-test
@@ -48,10 +49,10 @@ windows-lint:
     rustup target add x86_64-pc-windows-msvc
     LIBGHOSTTY_VT_SIMD=false cargo clippy --bin herdr --locked --target x86_64-pc-windows-msvc -- -D warnings
 
-# Check formatting + run unit tests + Windows target lint + maintenance script tests
+# Check formatting + run unit tests + Windows target lint + documentation contract tests
 [unix]
-check: python-preflight ci windows-lint
-    {{quote(python)}} -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_config_reference_check scripts.test_docs_translation_parity scripts.test_hermes_integration_asset scripts.test_package_windows_conpty scripts.test_preview scripts.test_unix_installer scripts.test_vendor_libghostty_vt scripts.test_vendor_portable_pty
+check: ci windows-lint
+    just docs-contract-test
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
 [script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
@@ -67,12 +68,6 @@ install-hooks:
     @echo "installed git hooks from .githooks"
 
 # Build release binary
-[unix]
-build:
-    cargo build --release --locked
-
-[script("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File")]
-[windows]
 build:
     cargo build --release --locked
 
@@ -85,9 +80,9 @@ bench-release-smoke:
     cargo build --release --locked
     scripts/release_perf_smoke.sh "${CARGO_TARGET_DIR:-target}/release/herdr"
 
-# Build the website and documentation
-website-build:
-    cd website && bun install --frozen-lockfile && bun run build
+# Test public documentation snapshot and release lifecycle tooling
+docs-contract-test:
+    bun test ./scripts/docs
 
 # Test bundled agent integration assets
 integration-assets-test:
@@ -104,11 +99,12 @@ build-libghostty-vt:
     scripts/build_vendored_libghostty_vt.sh
 
 # Check that release docs and changelog have been finalized from docs/next before release
-release-docs-check: python-preflight
-    {{quote(python)}} scripts/agent_detection_manifest_check.py --require-website
-    {{quote(python)}} scripts/config_reference_check.py
-    node website/scripts/docs-versions.mjs check
-    node website/scripts/docs-preview.mjs check
+release-docs-check:
+    python3 scripts/agent_detection_manifest_check.py --require-all-published
+    python3 scripts/config_reference_check.py
+    node scripts/docs/versions.mjs check
+    node scripts/docs/preview.mjs check
+    just docs-contract-test
     @test -f docs/next/README.md
     @test -f docs/next/README.zh-CN.md
     @if ! diff -u CHANGELOG.md docs/next/CHANGELOG.md; then \
@@ -117,7 +113,7 @@ release-docs-check: python-preflight
     fi
     @for file in CONFIGURATION.md INTEGRATIONS.md SOCKET_API.md; do \
         if [ -e "$file" ]; then \
-            echo "error: $file was replaced by website docs; remove the root copy"; \
+            echo "error: $file was replaced by technical docs; remove the root copy"; \
             exit 1; \
         fi; \
     done
@@ -138,9 +134,7 @@ release-docs-check: python-preflight
             exit 1; \
         fi; \
     done
-    {{quote(python)}} scripts/docs_translation_parity.py --docs-root docs/next/website/src/content/docs
-    just website-build
-    cd website && bun run build:draft
+    python3 scripts/docs_translation_parity.py --docs-root docs/next/website/src/content/docs
 
 # Validate release docs, render scaling, and end-to-end CPU before release preparation
 pre-release-check:
@@ -152,7 +146,7 @@ pre-release-check:
     @echo "release policy: do not update skills/herdr/SKILL.md between stable releases; preview builds keep the latest stable skill."
 
 # Prepare the release commit without tagging or pushing (usage: just release-prepare 0.1.1)
-release-prepare version: python-preflight
+release-prepare version:
     @printf '%s\n' '{{version}}' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { \
         echo "error: version must look like 0.6.6 without a v prefix"; \
         exit 1; \
@@ -169,7 +163,7 @@ release-prepare version: python-preflight
         exit 1; \
     fi
     just pre-release-check
-    {{quote(python)}} scripts/changelog.py prepare --version {{version}}
+    python3 scripts/changelog.py prepare --version {{version}}
     cp CHANGELOG.md docs/next/CHANGELOG.md
     sed -i.bak 's/^version = ".*"/version = "{{version}}"/' Cargo.toml && rm -f Cargo.toml.bak
     cargo update -p herdr --offline
@@ -179,7 +173,7 @@ release-prepare version: python-preflight
     @echo "v{{version}} release commit prepared. Review it, then run: just release-publish {{version}}"
 
 # Tag and push an already-prepared release commit (usage: just release-publish 0.1.1)
-release-publish version: python-preflight
+release-publish version:
     @printf '%s\n' '{{version}}' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { \
         echo "error: version must look like 0.6.6 without a v prefix"; \
         exit 1; \
@@ -204,7 +198,7 @@ release-publish version: python-preflight
         exit 1; \
     fi
     just release-docs-check
-    {{quote(python)}} scripts/changelog.py extract --version {{version}} --output /tmp/herdr-release-notes-check.md
+    python3 scripts/changelog.py extract --version {{version}} --output /tmp/herdr-release-notes-check.md
     rm -f /tmp/herdr-release-notes-check.md
     @local_head="$(git rev-parse HEAD)"; \
     remote_head="$(git rev-parse origin/master)"; \
@@ -218,7 +212,7 @@ release-publish version: python-preflight
     fi
     git tag -a v{{version}} -m "v{{version}}"
     git push origin v{{version}}
-    @echo "v{{version}} released — GitHub Actions building binaries and updating website/latest.json"
+    @echo "v{{version}} released — GitHub Actions building binaries and updating distribution/latest.json"
 
 # Prepare, verify, tag, push, and trigger the GitHub Release workflow (usage: just release 0.1.1)
 release version:

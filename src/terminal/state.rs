@@ -133,6 +133,8 @@ pub struct TerminalState {
     pub agent_name: Option<String>,
     agent_name_owner: Option<AgentNameOwner>,
     managed_agent: Option<ManagedAgent>,
+    managed_agent_launch_session: Option<crate::agent_resume::PersistedAgentSession>,
+    agent_resume_profile: Option<String>,
     hook_report_sequences: HashMap<String, u64>,
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
@@ -167,6 +169,8 @@ impl TerminalState {
             agent_name: None,
             agent_name_owner: None,
             managed_agent: None,
+            managed_agent_launch_session: None,
+            agent_resume_profile: None,
             hook_report_sequences: HashMap::new(),
             suppressed_full_lifecycle_hook_reports: HashMap::new(),
             stale_full_lifecycle_hook_sessions: HashMap::new(),
@@ -573,7 +577,7 @@ impl TerminalState {
             self.persisted_agent_session = durable_session;
         }
         if agent_released {
-            self.clear_agent_name();
+            self.clear_managed_agent();
         }
         TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -1367,6 +1371,14 @@ impl TerminalState {
         self.persisted_agent_session = Some(session);
     }
 
+    pub fn set_managed_agent_launch_session(
+        &mut self,
+        session: crate::agent_resume::PersistedAgentSession,
+    ) {
+        self.persisted_agent_session = Some(session.clone());
+        self.managed_agent_launch_session = Some(session);
+    }
+
     pub fn set_agent_session_ref(
         &mut self,
         source: String,
@@ -1587,11 +1599,15 @@ impl TerminalState {
             self.hook_authority = None;
         }
         self.reconcile_agent_name_owner(&agent_label, Some(&session_ref));
-        self.persisted_agent_session = Some(crate::agent_resume::PersistedAgentSession {
+        let persisted_session = crate::agent_resume::PersistedAgentSession {
             source,
             agent: agent_label,
             session_ref,
-        });
+        };
+        if self.managed_agent_launch_session.as_ref() == Some(&persisted_session) {
+            self.managed_agent_launch_session = None;
+        }
+        self.persisted_agent_session = Some(persisted_session);
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -1768,7 +1784,7 @@ impl TerminalState {
             self.fallback_state = AgentState::Unknown;
             self.fallback_visible_blocker = false;
             self.fallback_observed_at = None;
-            self.clear_agent_name();
+            self.clear_managed_agent();
         }
         self.hook_authority = None;
         if !preserve_foreign_persisted_session {
@@ -1901,6 +1917,7 @@ impl TerminalState {
         settle_delay: Duration,
         timeout: Duration,
     ) {
+        self.agent_resume_profile = None;
         self.set_agent_name(name);
         self.agent_name_owner = Some(AgentNameOwner {
             agent_label: crate::detect::agent_label(kind).to_string(),
@@ -1934,6 +1951,14 @@ impl TerminalState {
         self.managed_agent.map(|managed| managed.kind)
     }
 
+    pub fn set_agent_resume_profile(&mut self, profile: Option<String>) {
+        self.agent_resume_profile = profile;
+    }
+
+    pub fn agent_resume_profile(&self) -> Option<&str> {
+        self.agent_resume_profile.as_deref()
+    }
+
     pub fn next_managed_agent_deadline(&self) -> Option<Instant> {
         let ManagedAgentPhase::Pending {
             ready_after,
@@ -1963,7 +1988,7 @@ impl TerminalState {
                 && observed_expected
                 && known_agent.is_none();
         if clear {
-            self.clear_agent_name();
+            self.clear_managed_agent();
             return true;
         }
         if managed.phase == ManagedAgentPhase::Blocked {
@@ -1972,6 +1997,7 @@ impl TerminalState {
                     kind: managed.kind,
                     phase: ManagedAgentPhase::Active,
                 });
+                self.managed_agent_launch_session = None;
                 return true;
             }
             return false;
@@ -1990,7 +2016,7 @@ impl TerminalState {
                 return true;
             }
             if now >= deadline {
-                self.clear_agent_name();
+                self.clear_managed_agent();
                 return true;
             }
             if ready_after.is_none_or(|ready_after| now >= ready_after) {
@@ -1999,6 +2025,7 @@ impl TerminalState {
                         kind: managed.kind,
                         phase: ManagedAgentPhase::Active,
                     });
+                    self.managed_agent_launch_session = None;
                     return true;
                 }
                 if ready_after.is_some() {
@@ -2040,7 +2067,20 @@ impl TerminalState {
         });
     }
 
+    pub fn clear_managed_agent(&mut self) {
+        self.agent_resume_profile = None;
+        self.clear_agent_name();
+    }
+
     pub fn clear_agent_name(&mut self) {
+        if self
+            .managed_agent_launch_session
+            .take()
+            .as_ref()
+            .is_some_and(|session| self.persisted_agent_session.as_ref() == Some(session))
+        {
+            self.persisted_agent_session = None;
+        }
         self.agent_name = None;
         self.agent_name_owner = None;
         self.managed_agent = None;
@@ -2064,6 +2104,7 @@ impl TerminalState {
         self.recent_agent_process_exit = None;
         self.agent_process_acquisition_pending = false;
         self.pending_agent_resume_plan = None;
+        self.agent_resume_profile = None;
         self.clear_agent_name();
     }
 
@@ -2256,10 +2297,12 @@ mod tests {
             Duration::ZERO,
             Duration::from_secs(1),
         );
+        mismatch.set_agent_resume_profile(Some("review".into()));
         mismatch.set_detected_state(Some(Agent::Codex), AgentState::Idle);
         assert!(mismatch.reconcile_managed_agent_at(now, false));
         assert_eq!(mismatch.agent_name, None);
         assert_eq!(mismatch.managed_agent_kind(), None);
+        assert_eq!(mismatch.agent_resume_profile(), None);
 
         let mut timed_out = test_terminal();
         timed_out.begin_managed_agent(
@@ -2269,9 +2312,41 @@ mod tests {
             Duration::from_millis(10),
             Duration::from_millis(20),
         );
+        timed_out.set_managed_agent_launch_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("codex-session").unwrap(),
+        });
+        timed_out.set_agent_resume_profile(Some("review".into()));
         assert!(timed_out.reconcile_managed_agent_at(now + Duration::from_millis(20), false));
         assert_eq!(timed_out.agent_name, None);
         assert_eq!(timed_out.managed_agent_kind(), None);
+        assert!(timed_out.persisted_agent_session.is_none());
+        assert_eq!(timed_out.agent_resume_profile(), None);
+
+        let mut exited = test_terminal();
+        exited.begin_managed_agent(
+            "reviewer".into(),
+            Agent::Pi,
+            now,
+            Duration::ZERO,
+            Duration::from_secs(1),
+        );
+        exited.set_agent_resume_profile(Some("review".into()));
+        exited.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        assert!(exited.reconcile_managed_agent_at(now, false));
+        exited.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            now,
+        );
+        assert_eq!(exited.agent_name, None);
+        assert_eq!(exited.managed_agent_kind(), None);
+        assert_eq!(exited.agent_resume_profile(), None);
     }
 
     #[test]
@@ -4753,6 +4828,60 @@ mod tests {
         assert!(!terminal
             .hook_report_sequences
             .contains_key("herdr:opencode"));
+    }
+
+    #[test]
+    fn opencode_child_prompt_reports_with_root_id_preserve_lifecycle_authority() {
+        let mut terminal = test_terminal();
+        let root = crate::agent_resume::AgentSessionRef::id("opencode-root").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::OpenCode,
+            "herdr:opencode",
+            "opencode",
+            root.clone(),
+        );
+
+        // The plugin projects child permission/question events onto their root.
+        for (seq, state) in [
+            (20, AgentState::Working),
+            (21, AgentState::Blocked),
+            (22, AgentState::Working),
+            (23, AgentState::Idle),
+        ] {
+            let mutation = terminal
+                .set_hook_authority_with_session_ref(
+                    "herdr:opencode".into(),
+                    "opencode".into(),
+                    state,
+                    None,
+                    Some(root.clone()),
+                    Some(seq),
+                )
+                .expect("root-scoped lifecycle report should be accepted");
+            assert!(!mutation.session_ref_changed);
+            assert_eq!(terminal.state, state);
+            assert_eq!(
+                terminal
+                    .hook_authority
+                    .as_ref()
+                    .unwrap()
+                    .session_ref
+                    .as_ref(),
+                Some(&root)
+            );
+        }
+
+        let foreign_child_prompt = terminal.set_hook_authority_with_session_ref(
+            "herdr:opencode".into(),
+            "opencode".into(),
+            AgentState::Blocked,
+            None,
+            crate::agent_resume::AgentSessionRef::id("opencode-other-root"),
+            Some(24),
+        );
+        assert!(foreign_child_prompt.is_none());
+        assert_eq!(terminal.state, AgentState::Idle);
     }
 
     #[test]

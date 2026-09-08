@@ -19,6 +19,68 @@ fn valid_agent_name(name: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
 }
 
+fn pi_profile_from_args(args: &[String]) -> Option<String> {
+    let mut profile = None;
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            break;
+        }
+        if let Some(value) = arg.strip_prefix("--profile=") {
+            profile = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        if arg == "--profile" {
+            if let Some(value) = args
+                .get(index + 1)
+                .filter(|value| !value.starts_with('-') && !value.starts_with('@'))
+            {
+                profile = Some(value.clone());
+                index += 2;
+                continue;
+            }
+        }
+
+        // Pi's core parser consumes the next token for these options even when
+        // it looks like another flag. Mirror that behavior so such a value is
+        // never mistaken for the extension-provided --profile option.
+        if matches!(
+            arg.as_str(),
+            "--mode"
+                | "--provider"
+                | "--model"
+                | "--api-key"
+                | "--system-prompt"
+                | "--append-system-prompt"
+                | "--name"
+                | "-n"
+                | "--session"
+                | "--session-id"
+                | "--fork"
+                | "--session-dir"
+                | "--models"
+                | "--tools"
+                | "-t"
+                | "--exclude-tools"
+                | "-xt"
+                | "--thinking"
+                | "--export"
+                | "--extension"
+                | "-e"
+                | "--skill"
+                | "--prompt-template"
+                | "--theme"
+        ) && args.get(index + 1).is_some()
+        {
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    profile
+}
+
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
         self.state
@@ -80,7 +142,7 @@ impl App {
         self.state
             .focus_pane_in_workspace(resolved.ws_idx, resolved.pane_id);
         self.state.mark_active_tab_seen();
-        self.state.settle_terminal_mode_after_focus();
+        self.state.mode = crate::app::Mode::Terminal;
         self.agent_info(resolved.ws_idx, resolved.pane_id)
             .ok_or_else(|| TerminalTargetError::NotFound {
                 target: target.to_string(),
@@ -160,6 +222,11 @@ impl App {
         {
             return Err(AgentStartError::InvalidArgument);
         }
+        let resume_profile = (kind == crate::detect::Agent::Pi)
+            .then(|| pi_profile_from_args(&params.args))
+            .flatten();
+        let persisted_agent_session =
+            crate::agent_resume::persisted_session_from_launch_args(kind, &params.args);
         let conflicts = self.agent_name_conflicts(&name, "");
         if !conflicts.is_empty() {
             return Err(AgentStartError::DuplicateName {
@@ -213,9 +280,13 @@ impl App {
             .get_mut(&terminal_id)
             .ok_or_else(|| AgentStartError::TargetUnavailable(params.pane_id.clone()))?;
         terminal.begin_managed_agent(name.clone(), kind, now, AGENT_START_SETTLE_DELAY, timeout);
+        terminal.set_agent_resume_profile(resume_profile);
         if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
-            terminal.clear_agent_name();
+            terminal.clear_managed_agent();
             return Err(AgentStartError::InputFailed(err.to_string()));
+        }
+        if let Some(session) = persisted_agent_session {
+            terminal.set_managed_agent_launch_session(session);
         }
         self.state.mark_session_dirty();
         self.schedule_session_save();
@@ -468,7 +539,21 @@ pub(super) enum AgentRenameError {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_agent_name;
+    use super::{pi_profile_from_args, valid_agent_name};
+
+    #[test]
+    fn pi_profile_accepts_both_cli_forms_without_retaining_other_args() {
+        let split = ["--model", "fast", "--profile", "review"].map(str::to_string);
+        let inline = ["--profile=review", "--thinking", "high"].map(str::to_string);
+
+        assert_eq!(pi_profile_from_args(&split).as_deref(), Some("review"));
+        assert_eq!(pi_profile_from_args(&inline).as_deref(), Some("review"));
+        assert_eq!(pi_profile_from_args(&["--model=fast".into()]), None);
+        assert_eq!(
+            pi_profile_from_args(&["--model".into(), "--profile".into(), "review".into()]),
+            None
+        );
+    }
 
     #[test]
     fn agent_names_use_a_small_cli_safe_grammar() {

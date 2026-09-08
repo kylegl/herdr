@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use crate::app::App;
 use crate::{
     app::state::AppState,
     detect::AgentState,
@@ -14,6 +16,27 @@ const ATTENTION_DEBOUNCE: Duration = Duration::from_millis(300);
 enum AttentionKind {
     Blocked,
     Done,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttentionHandoffKind {
+    Blocked,
+    Done,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttentionHandoffEntry {
+    pub(crate) source_pane_id: String,
+    pub(crate) kind: AttentionHandoffKind,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct AttentionHandoffState {
+    pub(crate) queue: Vec<AttentionHandoffEntry>,
+    pub(crate) dismissed_source_pane_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,17 +92,59 @@ struct DockPlacement {
     cross_workspace_identity: Option<CrossWorkspaceIdentity>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttentionSourceTarget {
+    pub(crate) workspace_id: String,
+    pub(crate) tab_number: usize,
+    pub(crate) pane_id: PaneId,
+    pub(crate) public_pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttentionHostTarget {
+    pub(crate) workspace_id: String,
+    pub(crate) tab_number: usize,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AttentionDockState {
     queue: Vec<AttentionEntry>,
     dismissed: std::collections::HashSet<PaneId>,
     placement: Option<DockPlacement>,
     presented_at_home: Option<PaneId>,
+    host: Option<AttentionHostTarget>,
     reconcile_suspended: bool,
     next_sequence: u64,
 }
 
 impl AppState {
+    pub(crate) fn set_attention_host(
+        &mut self,
+        host: Option<AttentionHostTarget>,
+        terminal_runtimes: &TerminalRuntimeRegistry,
+    ) -> bool {
+        if self.attention_dock.host == host {
+            return false;
+        }
+        self.undock_attention();
+        self.attention_dock.host = host;
+        self.reconcile_attention_dock_from(terminal_runtimes);
+        true
+    }
+
+    fn attention_host_location(&self) -> Option<(usize, String, usize)> {
+        let host = self.attention_dock.host.as_ref()?;
+        let ws_idx = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == host.workspace_id)?;
+        let tab_idx = self.workspaces[ws_idx]
+            .tabs
+            .iter()
+            .position(|tab| tab.number == host.tab_number)?;
+        Some((ws_idx, host.workspace_id.clone(), tab_idx))
+    }
+
     #[cfg(any(unix, test))]
     pub(crate) fn rebuild_attention_queue_after_handoff(&mut self) {
         let dismissed = std::mem::take(&mut self.attention_dock.dismissed);
@@ -107,8 +172,10 @@ impl AppState {
             .collect::<Vec<_>>();
         candidates.sort_by_key(|(_, _, sequence)| *sequence);
 
+        let host = self.attention_dock.host.take();
         self.attention_dock = AttentionDockState {
             dismissed,
+            host,
             ..AttentionDockState::default()
         };
         let eligible_at = Instant::now() + ATTENTION_DEBOUNCE;
@@ -182,21 +249,22 @@ impl AppState {
         &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) {
-        if self.attention_dock.reconcile_suspended
-            || self.mode == crate::app::state::Mode::ContextMenu
-        {
+        if self.attention_dock.reconcile_suspended {
             return;
         }
         self.prune_attention_state();
 
         if let Some(presented) = self.attention_dock.presented_at_home {
-            let still_focused = self.current_pane_focus_target().is_some_and(|target| {
-                target.pane_id == presented
-                    && self
-                        .active
-                        .and_then(|idx| self.workspaces.get(idx))
-                        .is_some_and(|workspace| workspace.id == target.workspace_id)
-            });
+            let still_focused = self
+                .attention_host_location()
+                .and_then(|(ws_idx, _, tab_idx)| {
+                    self.workspaces
+                        .get(ws_idx)?
+                        .tabs
+                        .get(tab_idx)
+                        .map(|tab| tab.layout.focused() == presented)
+                })
+                .unwrap_or(false);
             if still_focused {
                 return;
             }
@@ -210,13 +278,15 @@ impl AppState {
                 .iter()
                 .any(|entry| entry.pane_id == placement.attention_pane);
             let pinned = placement_is_still_queued
-                && self.active.is_some_and(|ws_idx| {
-                    ws_idx < self.workspaces.len()
-                        && self.workspaces[ws_idx].id == placement.dock_workspace_id
-                        && self.workspaces[ws_idx].active_tab_index() == placement.dock_tab_idx
-                        && self.workspaces[ws_idx].focused_pane_id()
-                            == Some(placement.attention_pane)
-                });
+                && self
+                    .attention_host_location()
+                    .is_some_and(|(ws_idx, _, tab_idx)| {
+                        ws_idx < self.workspaces.len()
+                            && self.workspaces[ws_idx].id == placement.dock_workspace_id
+                            && tab_idx == placement.dock_tab_idx
+                            && self.workspaces[ws_idx].tabs[tab_idx].layout.focused()
+                                == placement.attention_pane
+                    });
             if pinned {
                 return;
             }
@@ -226,11 +296,7 @@ impl AppState {
         if desired.is_some_and(|pane_id| self.pending_agent_notifications.contains_key(&pane_id)) {
             return;
         }
-        let active_context = self.active.and_then(|ws_idx| {
-            self.workspaces
-                .get(ws_idx)
-                .map(|workspace| (ws_idx, workspace.id.clone(), workspace.active_tab_index()))
-        });
+        let active_context = self.attention_host_location();
         let placement_matches = self
             .attention_dock
             .placement
@@ -255,7 +321,11 @@ impl AppState {
             return;
         };
         if self.pane_location(attention_pane) == Some((active_ws_idx, dock_tab_idx)) {
-            self.mark_active_tab_seen();
+            if let Some(tab) = self.workspaces[active_ws_idx].tabs.get_mut(dock_tab_idx) {
+                for pane in tab.panes.values_mut() {
+                    pane.seen = true;
+                }
+            }
             return;
         }
         let Some((attention_home_ws_idx, attention_home_tab_idx)) =
@@ -367,14 +437,6 @@ impl AppState {
         self.restore_and_follow_docked_attention(placement)
     }
 
-    pub(crate) fn follow_docked_attention_home(&mut self) -> bool {
-        let Some(placement) = self.attention_dock.placement.clone() else {
-            return false;
-        };
-
-        self.restore_and_follow_docked_attention(placement)
-    }
-
     fn restore_and_follow_docked_attention(&mut self, placement: DockPlacement) -> bool {
         let attention_pane = placement.attention_pane;
         self.undock_attention();
@@ -405,26 +467,8 @@ impl AppState {
         true
     }
 
-    pub(crate) fn attention_home_is_active_tab(&self, pane_id: PaneId) -> Option<bool> {
+    pub(crate) fn docked_attention_source_context(&self) -> Option<(usize, usize, PaneId, String)> {
         let placement = self.attention_dock.placement.as_ref()?;
-        if placement.attention_pane != pane_id {
-            return None;
-        }
-        Some(
-            self.active == Some(placement.attention_home_ws_idx)
-                && self.workspaces[placement.attention_home_ws_idx].active_tab_index()
-                    == placement.attention_home_tab_idx,
-        )
-    }
-
-    pub(crate) fn focused_attention_source_context(
-        &self,
-    ) -> Option<(usize, usize, PaneId, String)> {
-        let placement = self.attention_dock.placement.as_ref()?;
-        let active_ws_idx = self.active?;
-        if self.workspaces.get(active_ws_idx)?.focused_pane_id() != Some(placement.attention_pane) {
-            return None;
-        }
         let home_ws_idx = self
             .workspaces
             .iter()
@@ -449,6 +493,50 @@ impl AppState {
             placement.attention_pane,
             public_pane_id,
         ))
+    }
+
+    pub(crate) fn focused_attention_source_context(
+        &self,
+    ) -> Option<(usize, usize, PaneId, String)> {
+        let placement = self.attention_dock.placement.as_ref()?;
+        let active_ws_idx = self.active?;
+        if self.workspaces.get(active_ws_idx)?.focused_pane_id() != Some(placement.attention_pane) {
+            return None;
+        }
+        self.docked_attention_source_context()
+    }
+
+    pub(crate) fn attention_source_matches(&self, expected_public_pane_id: &str) -> bool {
+        self.attention_source_target()
+            .is_some_and(|target| target.public_pane_id == expected_public_pane_id)
+    }
+
+    pub(crate) fn attention_source_target(&self) -> Option<AttentionSourceTarget> {
+        let (ws_idx, tab_idx, pane_id, public_pane_id) = self.docked_attention_source_context()?;
+        Some(AttentionSourceTarget {
+            workspace_id: self.workspaces.get(ws_idx)?.id.clone(),
+            tab_number: self.workspaces.get(ws_idx)?.tabs.get(tab_idx)?.number,
+            pane_id,
+            public_pane_id,
+        })
+    }
+
+    pub(crate) fn restore_docked_attention_home(&mut self) -> Option<AttentionSourceTarget> {
+        let target = self.attention_source_target()?;
+        self.undock_attention();
+        let ws_idx = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == target.workspace_id)?;
+        let tab_idx = self.workspaces[ws_idx]
+            .tabs
+            .iter()
+            .position(|tab| tab.number == target.tab_number)?;
+        self.workspaces[ws_idx].tabs[tab_idx]
+            .layout
+            .focus_pane(target.pane_id);
+        self.attention_dock.presented_at_home = Some(target.pane_id);
+        Some(target)
     }
 
     pub(crate) fn attention_dock_title_for_pane(&self, pane_id: PaneId) -> Option<String> {
@@ -510,6 +598,7 @@ impl AppState {
             .unwrap_or((AgentState::Unknown, true))
     }
 
+    #[cfg(test)]
     pub(crate) fn workspace_display_name(&self, workspace: &Workspace) -> String {
         if let Some(name) = self.stable_attention_workspace_name(workspace) {
             return name.to_owned();
@@ -650,6 +739,16 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn make_attention_ready_for_test(&mut self, pane_id: PaneId) {
+        if self.attention_dock.host.is_none() {
+            self.attention_dock.host = self.active.and_then(|ws_idx| {
+                let workspace = self.workspaces.get(ws_idx)?;
+                let tab = workspace.tabs.get(workspace.active_tab_index())?;
+                Some(AttentionHostTarget {
+                    workspace_id: workspace.id.clone(),
+                    tab_number: tab.number,
+                })
+            });
+        }
         if let Some(entry) = self
             .attention_dock
             .queue
@@ -990,6 +1089,96 @@ impl AppState {
     }
 }
 
+#[cfg(unix)]
+impl App {
+    pub(crate) fn attention_handoff_state(&self) -> AttentionHandoffState {
+        let queue = self
+            .state
+            .attention_dock
+            .queue
+            .iter()
+            .filter_map(|entry| {
+                let (workspace_index, _) = self.find_pane(entry.pane_id)?;
+                Some(AttentionHandoffEntry {
+                    source_pane_id: self.public_pane_id(workspace_index, entry.pane_id)?,
+                    kind: match entry.kind {
+                        AttentionKind::Blocked => AttentionHandoffKind::Blocked,
+                        AttentionKind::Done => AttentionHandoffKind::Done,
+                    },
+                })
+            })
+            .collect();
+        let mut dismissed_source_pane_ids = self
+            .state
+            .attention_dock
+            .dismissed
+            .iter()
+            .filter_map(|pane_id| {
+                let (workspace_index, _) = self.find_pane(*pane_id)?;
+                self.public_pane_id(workspace_index, *pane_id)
+            })
+            .collect::<Vec<_>>();
+        dismissed_source_pane_ids.sort();
+        AttentionHandoffState {
+            queue,
+            dismissed_source_pane_ids,
+        }
+    }
+
+    pub(crate) fn restore_attention_handoff_state(&mut self, state: AttentionHandoffState) {
+        let dismissed = state
+            .dismissed_source_pane_ids
+            .iter()
+            .filter_map(|pane_id| self.parse_current_public_pane_id(pane_id))
+            .map(|(_, pane_id)| pane_id)
+            .collect::<std::collections::HashSet<_>>();
+        let queue = state
+            .queue
+            .iter()
+            .filter_map(|entry| {
+                let (workspace_index, pane_id) =
+                    self.parse_current_public_pane_id(&entry.source_pane_id)?;
+                (!dismissed.contains(&pane_id)).then_some((workspace_index, pane_id, entry.kind))
+            })
+            .collect::<Vec<_>>();
+
+        self.state.attention_dock.queue.clear();
+        self.state.attention_dock.dismissed = dismissed;
+        self.state.attention_dock.presented_at_home = None;
+        self.state.attention_dock.next_sequence = 0;
+        let now = Instant::now();
+        for (workspace_index, pane_id, kind) in queue {
+            if kind == AttentionHandoffKind::Done {
+                if let Some(pane) =
+                    self.state
+                        .workspaces
+                        .get_mut(workspace_index)
+                        .and_then(|workspace| {
+                            workspace
+                                .tabs
+                                .iter_mut()
+                                .find_map(|tab| tab.panes.get_mut(&pane_id))
+                        })
+                {
+                    pane.seen = false;
+                }
+            }
+            let sequence = self.state.attention_dock.next_sequence;
+            self.state.attention_dock.next_sequence = sequence.saturating_add(1);
+            self.state.attention_dock.queue.push(AttentionEntry {
+                pane_id,
+                kind: match kind {
+                    AttentionHandoffKind::Blocked => AttentionKind::Blocked,
+                    AttentionHandoffKind::Done => AttentionKind::Done,
+                },
+                sequence,
+                eligible_at: now,
+                ready: true,
+            });
+        }
+    }
+}
+
 fn exchange_panes_in_tabs(
     workspaces: &mut [crate::workspace::Workspace],
     first_location: (usize, usize),
@@ -1125,6 +1314,17 @@ mod tests {
     use super::*;
     use crate::{app::Mode, workspace::Workspace};
 
+    fn test_app() -> crate::app::App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::app::App::new(
+            &crate::config::Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        )
+    }
+
     fn state_with_attention() -> (AppState, PaneId) {
         let home = Workspace::test_new("attention-home");
         let attention_pane = home.tabs[0].root_pane;
@@ -1135,6 +1335,10 @@ mod tests {
         state.active = Some(1);
         state.selected = 1;
         state.mode = Mode::Terminal;
+        state.attention_dock.host = Some(AttentionHostTarget {
+            workspace_id: state.workspaces[1].id.clone(),
+            tab_number: state.workspaces[1].tabs[0].number,
+        });
         state.observe_attention_transition(
             attention_pane,
             AgentState::Working,
@@ -1144,6 +1348,146 @@ mod tests {
         state.attention_dock.queue[0].eligible_at = Instant::now();
         state.attention_dock.queue[0].ready = true;
         (state, attention_pane)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serialized_handoff_restores_attention_fifo_kind_and_dismissal_into_fresh_app() {
+        let homes = [
+            Workspace::test_new("blocked"),
+            Workspace::test_new("done"),
+            Workspace::test_new("dismissed"),
+            Workspace::test_new("host"),
+        ];
+        let blocked = homes[0].tabs[0].root_pane;
+        let done = homes[1].tabs[0].root_pane;
+        let dismissed = homes[2].tabs[0].root_pane;
+        let mut source = test_app();
+        source.state.workspaces = homes.into_iter().collect();
+        source.state.ensure_test_terminals();
+        source.state.active = Some(3);
+        source.state.selected = 3;
+        source.state.mode = Mode::Terminal;
+        source.state.attention_dock.queue = vec![
+            AttentionEntry {
+                pane_id: blocked,
+                kind: AttentionKind::Blocked,
+                sequence: 7,
+                eligible_at: Instant::now(),
+                ready: true,
+            },
+            AttentionEntry {
+                pane_id: done,
+                kind: AttentionKind::Done,
+                sequence: 8,
+                eligible_at: Instant::now(),
+                ready: true,
+            },
+        ];
+        source.state.attention_dock.dismissed.insert(dismissed);
+        source.state.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&done)
+            .expect("done pane")
+            .seen = false;
+        source.state.prepare_attention_handoff();
+
+        let attention = source.attention_handoff_state();
+        let wire_attention = crate::server::handoff::HandoffAttentionState {
+            queue: attention
+                .queue
+                .into_iter()
+                .map(|entry| crate::server::handoff::HandoffAttentionEntry {
+                    source_pane_id: entry.source_pane_id,
+                    kind: match entry.kind {
+                        AttentionHandoffKind::Blocked => {
+                            crate::server::handoff::HandoffAttentionKind::Blocked
+                        }
+                        AttentionHandoffKind::Done => {
+                            crate::server::handoff::HandoffAttentionKind::Done
+                        }
+                    },
+                })
+                .collect(),
+            dismissed_source_pane_ids: attention.dismissed_source_pane_ids,
+        };
+        let snapshot = crate::persist::capture(
+            &source.state.workspaces,
+            &source.state.terminals,
+            &source.terminal_runtimes,
+            source.state.active,
+            source.state.selected,
+            None,
+        );
+        let manifest = crate::server::handoff::manifest_for(
+            snapshot,
+            Vec::new(),
+            None,
+            None,
+            None,
+            Some(wire_attention),
+        );
+        let encoded = serde_json::to_vec(&manifest).expect("serialize handoff manifest");
+        let mut manifest: crate::server::handoff::HandoffManifest =
+            serde_json::from_slice(&encoded).expect("deserialize handoff manifest");
+
+        let mut config = crate::config::Config::default();
+        config.terminal.default_shell = crate::app::exiting_test_command().to_owned();
+        let mut fresh = test_app();
+        let (workspaces, terminals, runtimes) = crate::persist::restore(
+            &manifest.snapshot,
+            None,
+            24,
+            80,
+            config.advanced.scrollback_limit_bytes,
+            &config.terminal.default_shell,
+            config.terminal.shell_mode,
+            false,
+            fresh.event_tx.clone(),
+            fresh.render_notify.clone(),
+            fresh.render_dirty.clone(),
+        );
+        fresh.state.workspaces = workspaces;
+        fresh.state.terminals = terminals;
+        fresh.terminal_runtimes = runtimes.into();
+        let restored = manifest.attention.take().expect("attention metadata");
+        fresh.restore_attention_handoff_state(AttentionHandoffState {
+            queue: restored
+                .queue
+                .into_iter()
+                .map(|entry| AttentionHandoffEntry {
+                    source_pane_id: entry.source_pane_id,
+                    kind: match entry.kind {
+                        crate::server::handoff::HandoffAttentionKind::Blocked => {
+                            AttentionHandoffKind::Blocked
+                        }
+                        crate::server::handoff::HandoffAttentionKind::Done => {
+                            AttentionHandoffKind::Done
+                        }
+                    },
+                })
+                .collect(),
+            dismissed_source_pane_ids: restored.dismissed_source_pane_ids,
+        });
+
+        let restored = fresh.attention_handoff_state();
+        assert_eq!(restored.queue.len(), 2);
+        assert_eq!(restored.queue[0].kind, AttentionHandoffKind::Blocked);
+        assert_eq!(restored.queue[1].kind, AttentionHandoffKind::Done);
+        assert_eq!(restored.dismissed_source_pane_ids.len(), 1);
+        let done_id = &restored.queue[1].source_pane_id;
+        let (workspace_index, done_pane) = fresh
+            .parse_current_public_pane_id(done_id)
+            .expect("restored done pane");
+        assert!(
+            !fresh.state.workspaces[workspace_index]
+                .tabs
+                .iter()
+                .find_map(|tab| tab.panes.get(&done_pane))
+                .expect("restored done pane state")
+                .seen
+        );
+        super::super::api::test_support::shutdown_test_runtimes(&mut fresh);
     }
 
     #[test]
@@ -1498,6 +1842,13 @@ mod tests {
         assert_eq!(state.pane_location(attention_pane), Some((1, 0)));
 
         state.switch_workspace(2);
+        state.set_attention_host(
+            Some(AttentionHostTarget {
+                workspace_id: state.workspaces[2].id.clone(),
+                tab_number: state.workspaces[2].tabs[0].number,
+            }),
+            &TerminalRuntimeRegistry::new(),
+        );
 
         assert_eq!(state.workspaces[1].tabs[0].layout.pane_count(), 1);
         assert_eq!(state.workspaces[2].tabs[0].layout.pane_count(), 2);
@@ -1509,6 +1860,13 @@ mod tests {
         let (mut state, attention_pane) = state_with_attention();
         state.active = Some(0);
         state.selected = 0;
+        state.set_attention_host(
+            Some(AttentionHostTarget {
+                workspace_id: state.workspaces[0].id.clone(),
+                tab_number: state.workspaces[0].tabs[0].number,
+            }),
+            &TerminalRuntimeRegistry::new(),
+        );
 
         state.reconcile_attention_dock();
 
@@ -1595,9 +1953,6 @@ mod tests {
                 &terminal_runtimes,
                 state.active,
                 state.selected,
-                state.sidebar_width,
-                state.sidebar_section_split,
-                state.collapsed_space_keys.clone(),
                 state.canonical_attention_exchange(),
             )
         };

@@ -69,6 +69,24 @@ pub fn session_ref_from_report(
     agent_session_id.and_then(AgentSessionRef::id)
 }
 
+pub fn persisted_session_from_launch_args(
+    agent: crate::detect::Agent,
+    args: &[String],
+) -> Option<PersistedAgentSession> {
+    let [command, session_id] = args else {
+        return None;
+    };
+    if agent != crate::detect::Agent::Codex || command != "resume" || session_id.starts_with('-') {
+        return None;
+    }
+
+    Some(PersistedAgentSession {
+        source: "herdr:codex".into(),
+        agent: "codex".into(),
+        session_ref: AgentSessionRef::id(session_id.clone())?,
+    })
+}
+
 pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
     match value.as_deref().map(str::trim) {
         Some(
@@ -116,6 +134,15 @@ pub fn session_ref_from_snapshot(
 }
 
 pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<AgentResumePlan> {
+    plan_with_profile(source, agent, session_ref, None)
+}
+
+pub fn plan_with_profile(
+    source: &str,
+    agent: &str,
+    session_ref: &AgentSessionRef,
+    profile: Option<&str>,
+) -> Option<AgentResumePlan> {
     if !is_official_agent_source(source, agent) {
         return None;
     }
@@ -151,7 +178,11 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
             ]
         }
         ("herdr:pi", "pi", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
-            vec!["pi".into(), "--session".into(), session_ref.value.clone()]
+            let mut argv = vec!["pi".into(), "--session".into(), session_ref.value.clone()];
+            if let Some(profile) = profile {
+                argv.extend(["--profile".into(), profile.to_string()]);
+            }
+            argv
         }
         ("herdr:omp", "omp", AgentSessionRefKind::Path | AgentSessionRefKind::Id) => {
             // omp resume is `-r, --resume=<value>` (ID prefix or path); it has no
@@ -280,6 +311,57 @@ mod tests {
             "herdr:opencode",
             "opencode"
         ));
+    }
+
+    #[test]
+    fn pi_resume_appends_only_the_selected_profile() {
+        let session = absolute_test_path("pi-session.jsonl");
+
+        assert_eq!(
+            plan_with_profile(
+                "herdr:pi",
+                "pi",
+                &AgentSessionRef::path(&session).unwrap(),
+                Some("review")
+            )
+            .unwrap()
+            .argv,
+            vec!["pi", "--session", session.as_str(), "--profile", "review"]
+        );
+    }
+
+    #[test]
+    fn codex_noncanonical_resume_launch_has_no_explicit_session() {
+        assert_eq!(
+            persisted_session_from_launch_args(
+                crate::detect::Agent::Codex,
+                &["resume".into(), "codex-session".into()]
+            )
+            .unwrap()
+            .session_ref
+            .value,
+            "codex-session"
+        );
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Codex,
+            &["resume".into(), "--last".into()]
+        )
+        .is_none());
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Codex,
+            &["resume".into(), "not-a-session".into(), "--last".into()]
+        )
+        .is_none());
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Codex,
+            &[
+                "--remote".into(),
+                "ws://example.test".into(),
+                "resume".into(),
+                "remote-session".into(),
+            ]
+        )
+        .is_none());
     }
 
     #[test]

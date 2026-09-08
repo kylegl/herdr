@@ -115,6 +115,8 @@ pub struct PaneAgentSessionSnapshot {
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -258,9 +260,6 @@ pub fn capture(
     terminal_runtimes: &TerminalRuntimeRegistry,
     active: Option<usize>,
     selected: usize,
-    sidebar_width: u16,
-    sidebar_section_split: f32,
-    collapsed_space_keys: std::collections::HashSet<String>,
     attention_exchange: Option<crate::app::attention_dock::CanonicalAttentionExchange>,
 ) -> SessionSnapshot {
     let mut snapshot = SessionSnapshot {
@@ -271,9 +270,9 @@ pub fn capture(
             .collect(),
         active,
         selected,
-        sidebar_width: Some(sidebar_width),
-        sidebar_section_split: Some(sidebar_section_split),
-        collapsed_space_keys,
+        sidebar_width: None,
+        sidebar_section_split: None,
+        collapsed_space_keys: std::collections::HashSet::new(),
     };
     if let Some(exchange) = attention_exchange {
         canonicalize_attention_snapshot(&mut snapshot, &exchange);
@@ -351,6 +350,11 @@ fn capture_tab(
                         agent: authority.agent_label.clone(),
                         kind: session_ref.kind,
                         value: session_ref.value.clone(),
+                        profile: if authority.agent_label == "pi" {
+                            terminal.agent_resume_profile().map(str::to_string)
+                        } else {
+                            None
+                        },
                     });
                 }
             }
@@ -362,6 +366,11 @@ fn capture_tab(
                     agent: session.agent.clone(),
                     kind: session.session_ref.kind,
                     value: session.session_ref.value.clone(),
+                    profile: if session.agent == "pi" {
+                        terminal.agent_resume_profile().map(str::to_string)
+                    } else {
+                        None
+                    },
                 })
         });
         panes.insert(
@@ -828,9 +837,6 @@ mod tests {
             terminal_runtimes,
             state.active,
             state.selected,
-            state.sidebar_width,
-            state.sidebar_section_split,
-            state.collapsed_space_keys.clone(),
             state.canonical_attention_exchange(),
         )
     }
@@ -872,6 +878,11 @@ mod tests {
                 std::time::Duration::ZERO,
                 std::time::Duration::from_secs(1),
             );
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_agent_resume_profile(Some("review".into()));
 
         let pending = capture_from_state(&state);
         let pending_pane = &pending.workspaces[0].tabs[0].panes[&root.raw()];
@@ -884,10 +895,38 @@ mod tests {
             crate::detect::AgentState::Idle,
         );
         assert!(terminal.reconcile_managed_agent_at(now, false));
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::path(test_session_path(
+                "pi-profile-session.jsonl",
+            ))
+            .unwrap(),
+        });
         let active = capture_from_state(&state);
         let active_pane = &active.workspaces[0].tabs[0].panes[&root.raw()];
         assert_eq!(active_pane.agent_name.as_deref(), Some("reviewer"));
         assert_eq!(active_pane.managed_agent_kind.as_deref(), Some("pi"));
+        assert_eq!(
+            active_pane
+                .agent_session
+                .as_ref()
+                .and_then(|session| session.profile.as_deref()),
+            Some("review")
+        );
+    }
+
+    #[test]
+    fn old_agent_session_snapshot_defaults_profile() {
+        let session: PaneAgentSessionSnapshot = serde_json::from_value(serde_json::json!({
+            "source": "herdr:pi",
+            "agent": "pi",
+            "kind": "path",
+            "value": test_session_path("pi-session.jsonl")
+        }))
+        .unwrap();
+
+        assert_eq!(session.profile, None);
     }
 
     #[test]
@@ -1162,16 +1201,13 @@ mod tests {
     }
 
     #[test]
-    fn capture_contract_tracks_sidebar_state() {
-        let mut state = state_with_workspaces(&["one"]);
-        state.sidebar_width = 31;
-        state.sidebar_section_split = 0.4;
-        state.collapsed_space_keys.insert("repo-key".into());
+    fn capture_contract_omits_legacy_server_chrome_state() {
+        let state = state_with_workspaces(&["one"]);
 
         let snapshot = capture_from_state(&state);
-        assert_eq!(snapshot.sidebar_width, Some(31));
-        assert_eq!(snapshot.sidebar_section_split, Some(0.4));
-        assert!(snapshot.collapsed_space_keys.contains("repo-key"));
+        assert_eq!(snapshot.sidebar_width, None);
+        assert_eq!(snapshot.sidebar_section_split, None);
+        assert!(snapshot.collapsed_space_keys.is_empty());
     }
 
     #[test]
@@ -1215,7 +1251,11 @@ mod tests {
         let mut state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
         let second = state.workspaces[0].test_split(Direction::Horizontal);
-        crate::ui::compute_view(&mut state, Rect::new(0, 0, 106, 20));
+        crate::ui::compute_view_with_runtime_registry(
+            &mut state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 106, 20),
+        );
 
         state.navigate_pane(NavDirection::Right);
 
@@ -1230,7 +1270,11 @@ mod tests {
         let root = state.workspaces[0].tabs[0].root_pane;
         state.workspaces[0].test_split(Direction::Horizontal);
         state.workspaces[0].layout.focus_pane(root);
-        crate::ui::compute_view(&mut state, Rect::new(0, 0, 106, 20));
+        crate::ui::compute_view_with_runtime_registry(
+            &mut state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 106, 20),
+        );
         let before = capture_from_state(&state);
 
         state.resize_pane(NavDirection::Right);
@@ -1404,6 +1448,7 @@ mod tests {
             .attached_terminal_id
             .clone();
         let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_resume_profile(Some("review".into()));
         terminal.set_detected_state(
             Some(crate::detect::Agent::Pi),
             crate::detect::AgentState::Idle,
@@ -1435,6 +1480,7 @@ mod tests {
             crate::agent_resume::AgentSessionRefKind::Path
         );
         assert_eq!(agent_session.value, session_path);
+        assert_eq!(agent_session.profile.as_deref(), Some("review"));
     }
 
     #[test]

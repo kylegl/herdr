@@ -8,7 +8,7 @@ The attention dock is automatic server-owned coordination, not a designated work
 
 - One global queue prioritizes `blocked`, then unseen `done`, with FIFO ordering inside each class.
 - A transition must remain `blocked` or `done` for 300 ms before it becomes eligible. Returning to `working` during that interval cancels it.
-- The queue head is physically exchanged into a transient tiled split in the active tab. The real pane and PTY move; there is no mirrored terminal renderer.
+- The queue head is physically exchanged into a transient tiled split in the owner client's tab. The lowest-ID live shell client becomes the owner and remains owner until disconnect. Other clients' navigation does not choose the host. The real pane and PTY move; there is no mirrored terminal renderer.
 - Placement is right of a single pane, below the right pane for two side-by-side panes, and right of the southeast pane otherwise.
 - The split does not steal focus. A focused attention pane remains pinned while its entry is queued, so input cannot be redirected. `working` or agent exit removes the entry even while focused.
 - Viewing or focusing does not acknowledge an entry. `prefix+o` restores and follows the focused attention pane home without resolving it.
@@ -26,14 +26,21 @@ The physical exchange is shared server topology. All attached clients can observ
 | --- | --- |
 | Queue, debounce, placement, exchange, restoration, pinning, canonical source context | `src/app/attention_dock.rs` |
 | Transient split insertion/removal and public pane numbering | `src/workspace.rs` |
-| Topology-changing actions that must undock first | `src/app/actions.rs`, `src/app/input/`, `src/app/api/` |
+| Topology-changing actions that must undock first | `src/app/actions.rs`, `src/app/custom_commands.rs`, `src/app/api/` |
 | Canonical snapshot and history cleanup | `src/persist/snapshot.rs` |
-| Live-handoff canonicalization and queue reconstruction | `src/server/headless.rs` |
+| Owner-client location and lifecycle synchronization | `src/server/headless/client_views.rs`, `notifications.rs`, `surface_interest.rs` |
+| Live-handoff canonicalization and queue transfer | `src/server/headless/lifecycle.rs`, `bootstrap.rs`, `src/server/handoff.rs` |
 | Source-aware plugin context | `src/app/api/plugins/context.rs`, `src/app/api/plugins/mod.rs` |
-| Border title and workspace presentation | `src/ui/panes.rs`, `src/ui/sidebar.rs`, `src/ui/mobile.rs` |
+| Border title, source actions, and workspace presentation | `src/ui/panes.rs`, `src/client/shell/input.rs`, `mouse.rs`, `sidebar.rs`, `agent_sidebar.rs` |
 | User documentation | `docs/next/website/src/content/docs/agents.mdx`, `session-state.mdx`, `quick-start.mdx` |
 
 The manual `attention_dock.set` and `attention_dock.clear` API and context-menu actions were removed. Do not restore them when resolving an upstream conflict unless product behavior is intentionally being redesigned.
+
+## Accepted 0.9.0 migration boundaries
+
+- The old 0.8.2 exporter cannot send attention queue metadata. Its first handoff to this build may reset queued done items, ordering, and dismissals. Subsequent handoffs between patched builds preserve these facts through optional handoff-only metadata.
+- Selecting a remote workspace in the sidebar does not activate its endpoint. Press Enter before rename, close, create, or worktree actions. Those actions are disabled for an inactive selection rather than dispatched to the active machine.
+- A failed custom or overlay process launch can leave navigation at the canonical source workspace even though attention is redocked. This failure-path navigation change is accepted for this migration.
 
 ## Upstream merge procedure
 

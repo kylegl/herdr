@@ -86,11 +86,13 @@ impl App {
         plugin: &InstalledPluginInfo,
         pane: PluginManifestPane,
         placement: PluginPanePlacement,
+        implicit_context: Option<PluginInvocationContext>,
     ) -> String {
-        let target_pane_id = params
-            .target_pane_id
-            .clone()
-            .or_else(|| self.current_public_pane_id());
+        let target_pane_id = params.target_pane_id.clone().or_else(|| {
+            implicit_context
+                .as_ref()
+                .and_then(|context| context.focused_pane_id.clone())
+        });
         let Some(target_pane_id) = target_pane_id else {
             return encode_error(id, "no_active_pane", "no active pane");
         };
@@ -101,7 +103,8 @@ impl App {
                 format!("pane {target_pane_id} not found"),
             );
         };
-        let context = self.plugin_context_for_pane(ws_idx, target_pane, "plugin-pane");
+        let context = implicit_context
+            .unwrap_or_else(|| self.plugin_context_for_pane(ws_idx, target_pane, "plugin-pane"));
         let cwd = self.plugin_pane_cwd(plugin, params.cwd);
         let extra_env =
             match self.plugin_pane_launch_env(plugin, &pane.id, &cwd, params.env, &context) {
@@ -177,19 +180,23 @@ impl App {
         params: PluginPaneOpenParams,
         plugin: &InstalledPluginInfo,
         pane: PluginManifestPane,
+        implicit_context: Option<PluginInvocationContext>,
     ) -> String {
-        let ws_idx = match params.workspace_id.as_deref() {
+        let workspace_id = params.workspace_id.as_deref().or_else(|| {
+            implicit_context
+                .as_ref()
+                .and_then(|context| context.workspace_id.as_deref())
+        });
+        let ws_idx = match workspace_id {
             Some(workspace_id) => match self.parse_workspace_id(workspace_id) {
                 Some(ws_idx) => ws_idx,
                 None => return encode_error(id, "workspace_not_found", "workspace not found"),
             },
-            None => match self.state.active {
-                Some(ws_idx) => ws_idx,
-                None => return encode_error(id, "no_active_workspace", "no active workspace"),
-            },
+            None => return encode_error(id, "no_active_workspace", "no active workspace"),
         };
         let cwd = self.plugin_pane_cwd(plugin, params.cwd);
-        let context = self.plugin_context_for_workspace(ws_idx, "plugin-pane");
+        let context = implicit_context
+            .unwrap_or_else(|| self.plugin_context_for_workspace(ws_idx, "plugin-pane"));
         let extra_env =
             match self.plugin_pane_launch_env(plugin, &pane.id, &cwd, params.env, &context) {
                 Ok(env) => env,
@@ -334,12 +341,6 @@ impl App {
         override_cwd
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from(&plugin.plugin_root))
-    }
-
-    fn current_public_pane_id(&self) -> Option<String> {
-        let ws_idx = self.state.active?;
-        let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
-        self.public_pane_id(ws_idx, pane_id)
     }
 }
 
