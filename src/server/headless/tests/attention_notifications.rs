@@ -360,3 +360,164 @@ async fn attention_geometry_respects_two_client_controllers_and_restores_on_work
     server.app.state.assert_invariants_for_test();
     shutdown_test_runtimes(&mut server);
 }
+
+#[tokio::test]
+async fn attention_navigation_preserves_hidden_host_size_until_viewed() {
+    use crate::api::schema::{Method, WorkspaceTarget};
+    use crate::detect::{Agent, AgentState};
+
+    for with_peer in [false, true] {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = ["source", "first-host", "second-host"]
+            .map(crate::workspace::Workspace::test_new)
+            .into();
+        server.app.state.ensure_test_terminals();
+        let panes: Vec<_> = server
+            .app
+            .state
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.tabs[0].root_pane)
+            .collect();
+        for (index, pane) in panes.iter().enumerate() {
+            let terminal = server.app.state.workspaces[index]
+                .terminal_id(*pane)
+                .unwrap()
+                .clone();
+            server.app.terminal_runtimes.insert(
+                terminal,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(100, 30, b""),
+            );
+        }
+        server.app.state.active = Some(1);
+        server.app.state.selected = 1;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.toast_config.delay_seconds = 0;
+        let owner = connect_test_shell(&mut server, 10, 100, 30);
+        let peer = with_peer.then(|| connect_test_shell(&mut server, 20, 70, 20));
+        if with_peer {
+            let home = server.app.public_tab_id(0, 0).unwrap();
+            server.focus_shell_client_on_tab(20, &home);
+            server.claim_shell_tab_geometry(20, false);
+        }
+        let size = |server: &HeadlessServer, index: usize| {
+            server
+                .app
+                .state
+                .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, index, panes[index])
+                .unwrap()
+                .current_size()
+        };
+        let full_size = size(&server, 1);
+        server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
+            pane_id: panes[0],
+            agent: Some(Agent::Pi),
+            state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        let deadline = server.app.state.next_attention_deadline().unwrap();
+        server.handle_scheduled_tasks_headless(deadline, false);
+        server.render_and_stream();
+        let docked_size = size(&server, 1);
+        assert!(docked_size.1 < full_size.1);
+        let first_host_terminal = server.app.state.workspaces[1]
+            .terminal_id(panes[1])
+            .unwrap()
+            .clone();
+        let docked_content_seq = server
+            .app
+            .terminal_runtimes
+            .get(&first_host_terminal)
+            .unwrap()
+            .content_seq();
+
+        for host in [2, 1, 2, 1] {
+            let (respond_to, response) = std::sync::mpsc::channel();
+            let request = crate::api::ApiRequestMessage {
+                request: crate::api::schema::Request {
+                    id: format!("focus-{host}"),
+                    method: Method::WorkspaceFocus(WorkspaceTarget {
+                        workspace_id: server.app.state.workspaces[host].id.clone(),
+                    }),
+                },
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            };
+            // Exercise both public navigation and the client-owned sidebar route.
+            if with_peer {
+                server.handle_client_shell_api_request(10, request);
+            } else {
+                server.handle_api_request_with_shutdown_check(request);
+            }
+            assert!(response.try_recv().unwrap().contains("\"result\""));
+            server.render_and_stream();
+            assert_eq!(
+                size(&server, 1),
+                docked_size,
+                "moving the dock must not expand its now-hidden former host"
+            );
+            assert_eq!(
+                server
+                    .app
+                    .terminal_runtimes
+                    .get(&first_host_terminal)
+                    .unwrap()
+                    .content_seq(),
+                docked_content_seq,
+                "returning must not resize through an intermediate full-width layout"
+            );
+            assert_eq!(size(&server, 2), docked_size);
+            server.app.state.assert_invariants_for_test();
+            while owner.1.try_recv().is_ok() {}
+            if let Some(peer) = &peer {
+                while peer.1.try_recv().is_ok() {}
+            }
+        }
+        let second_host_size = if with_peer {
+            // Another viewer makes the former host visible at a different size.
+            let second_host = server.app.public_tab_id(2, 0).unwrap();
+            server.focus_shell_client_on_tab(20, &second_host);
+            server.claim_shell_tab_geometry(20, false);
+            server.reapply_controlled_shell_tab_geometry(false);
+            let layout = crate::ui::compute_tab_surface_for(
+                &server.app.state,
+                &server.app.terminal_runtimes,
+                Some(crate::ui::TabSurfaceTarget {
+                    workspace_index: 2,
+                    tab_index: 0,
+                }),
+                Rect::new(0, 0, 70, 20),
+                false,
+                Default::default(),
+            );
+            let rect = layout.pane_infos[0].inner_rect;
+            assert_eq!(size(&server, 2), (rect.height, rect.width));
+            assert_eq!(size(&server, 1), docked_size);
+            size(&server, 2)
+        } else {
+            full_size
+        };
+        server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
+            pane_id: panes[0],
+            agent: Some(Agent::Pi),
+            state: AgentState::Working,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        server.render_and_stream();
+        assert!(server.app.state.docked_attention_pane().is_none());
+        assert_eq!(
+            size(&server, 1),
+            full_size,
+            "removing the dock must restore its visible host immediately"
+        );
+        assert_eq!(size(&server, 2), second_host_size);
+        shutdown_test_runtimes(&mut server);
+    }
+}

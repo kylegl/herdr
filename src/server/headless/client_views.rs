@@ -601,7 +601,10 @@ impl HeadlessServer {
             crate::kitty_graphics::HostCellSize::default()
         };
         let area = Rect::new(0, 0, cols, rows);
-        if self.app_client_count() == 1 {
+        // A moving attention split must not expand its hidden former host only to
+        // shrink it again on return. Keep hidden PTYs at their last size while the
+        // dock is open; a viewer or dock removal reapplies their current layout.
+        if self.app_client_count() == 1 && self.app.state.docked_attention_pane().is_none() {
             for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
                 for tab_index in 0..workspace.tabs.len() {
                     crate::ui::resize_tab_surface(
@@ -671,13 +674,14 @@ impl HeadlessServer {
         for viewers in viewed_tabs.values_mut() {
             viewers.sort_unstable();
         }
-        for (tab_id, viewers) in viewed_tabs {
+        for (tab_id, viewers) in &viewed_tabs {
             let controller_is_viewing = self
                 .tab_geometry_controllers
-                .get(&tab_id)
+                .get(tab_id)
                 .is_some_and(|controller| viewers.contains(controller));
             if !controller_is_viewing {
-                self.tab_geometry_controllers.insert(tab_id, viewers[0]);
+                self.tab_geometry_controllers
+                    .insert(tab_id.clone(), viewers[0]);
             }
         }
 
@@ -688,6 +692,10 @@ impl HeadlessServer {
         let mut controlled_tabs = self
             .tab_geometry_controllers
             .iter()
+            .filter(|(tab_id, _)| {
+                self.app.state.docked_attention_pane().is_none()
+                    || viewed_tabs.contains_key(*tab_id)
+            })
             .filter_map(|(tab_id, &client_id)| {
                 self.app
                     .parse_tab_id(tab_id)
