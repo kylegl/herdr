@@ -349,24 +349,18 @@ impl AppState {
             .display_name_from(&self.terminals, terminal_runtimes);
         let dock_workspace_name =
             self.workspaces[active_ws_idx].display_name_from(&self.terminals, terminal_runtimes);
-        let (anchor, direction, focused, dock_was_zoomed, cwd) = {
+        // The transient pane ends up at the source after the exchange. Its cwd feeds
+        // workspace identity and background Git refresh while the real pane is away.
+        let placeholder_cwd = self.workspaces[attention_home_ws_idx].tabs[attention_home_tab_idx]
+            .cwd_for_pane(attention_pane, &self.terminals, terminal_runtimes)
+            .unwrap_or_else(|| self.workspaces[attention_home_ws_idx].identity_cwd.clone());
+        let (anchor, direction, focused, dock_was_zoomed) = {
             let workspace = &self.workspaces[active_ws_idx];
             let tab = &workspace.tabs[dock_tab_idx];
             let Some((anchor, direction)) = automatic_dock_slot(&tab.layout) else {
                 return;
             };
-            (
-                anchor,
-                direction,
-                tab.layout.focused(),
-                tab.zoomed,
-                workspace
-                    .resolved_identity_cwd_from(
-                        &self.terminals,
-                        &crate::terminal::TerminalRuntimeRegistry::new(),
-                    )
-                    .unwrap_or_default(),
-            )
+            (anchor, direction, tab.layout.focused(), tab.zoomed)
         };
         let dock_next_public_pane_number_before =
             self.workspaces[active_ws_idx].next_public_pane_number;
@@ -379,7 +373,7 @@ impl AppState {
         };
         self.terminals.insert(
             transient_terminal.clone(),
-            TerminalState::new(transient_terminal.clone(), cwd),
+            TerminalState::new(transient_terminal.clone(), placeholder_cwd),
         );
 
         let Some(cross_workspace_identity) = self.dock_exchange(attention_pane, dock_pane) else {
@@ -1906,11 +1900,50 @@ mod tests {
             state.workspace_display_name_from(&state.workspaces[0], &terminal_runtimes),
             "current-home"
         );
+        assert_eq!(
+            state.workspaces[0].resolved_identity_cwd_from(&state.terminals, &terminal_runtimes),
+            Some(live_cwd),
+            "the placeholder used for background Git refresh must retain the live source cwd"
+        );
 
         for (_, runtime) in terminal_runtimes.drain() {
             runtime.shutdown();
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn attention_placeholder_keeps_workspace_git_identity_at_home() {
+        let (mut state, attention_pane) = state_with_attention();
+        for (workspace, cwd) in state
+            .workspaces
+            .iter()
+            .zip(["/repos/herdr/master", "/repos/cohdex2"])
+        {
+            let terminal_id = workspace.terminal_id(workspace.tabs[0].root_pane).unwrap();
+            state.terminals.get_mut(terminal_id).unwrap().cwd = cwd.into();
+        }
+        let runtimes = TerminalRuntimeRegistry::new();
+        let identities = |state: &AppState| {
+            state
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.resolved_identity_cwd_from(&state.terminals, &runtimes))
+                .collect::<Vec<_>>()
+        };
+        let before = identities(&state);
+
+        state.reconcile_attention_dock();
+
+        assert_eq!(state.pane_location(attention_pane), Some((1, 0)));
+        assert_eq!(
+            identities(&state),
+            before,
+            "Git refresh must not borrow the host's branch for the blocked source workspace"
+        );
+        state.prepare_attention_topology_mutation();
+        assert_eq!(identities(&state), before);
+        state.assert_invariants_for_test();
     }
 
     #[test]
