@@ -158,6 +158,9 @@ impl AppState {
                     return None;
                 }
                 let terminal = self.terminals.get(&pane.attached_terminal_id)?;
+                if !attention_eligible(terminal) {
+                    return None;
+                }
                 let kind = match (terminal.state, pane.seen) {
                     (AgentState::Blocked, _) => AttentionKind::Blocked,
                     (AgentState::Idle, false) => AttentionKind::Done,
@@ -200,6 +203,14 @@ impl AppState {
     ) {
         if state == AgentState::Working {
             self.attention_dock.dismissed.remove(&pane_id);
+            self.remove_attention_entry(pane_id);
+            return;
+        }
+        let terminal = self
+            .workspaces
+            .iter()
+            .find_map(|workspace| self.terminals.get(workspace.terminal_id(pane_id)?));
+        if terminal.is_some_and(|terminal| !attention_eligible(terminal)) {
             self.remove_attention_entry(pane_id);
             return;
         }
@@ -804,18 +815,31 @@ impl AppState {
     }
 
     fn prune_attention_state(&mut self) {
-        let live_panes: std::collections::HashSet<_> = self
+        let eligible_panes: std::collections::HashSet<_> = self
             .workspaces
             .iter()
             .flat_map(|workspace| workspace.tabs.iter())
-            .flat_map(|tab| tab.panes.keys().copied())
+            .flat_map(|tab| tab.panes.iter())
+            .filter(|(_, pane)| {
+                self.terminals
+                    .get(&pane.attached_terminal_id)
+                    .is_none_or(attention_eligible)
+            })
+            .map(|(pane_id, _)| *pane_id)
             .collect();
         self.attention_dock
             .queue
-            .retain(|entry| live_panes.contains(&entry.pane_id));
+            .retain(|entry| eligible_panes.contains(&entry.pane_id));
         self.attention_dock
             .dismissed
-            .retain(|pane_id| live_panes.contains(pane_id));
+            .retain(|pane_id| eligible_panes.contains(pane_id));
+        if self
+            .attention_dock
+            .presented_at_home
+            .is_some_and(|pane_id| !eligible_panes.contains(&pane_id))
+        {
+            self.attention_dock.presented_at_home = None;
+        }
     }
 
     fn undock_attention(&mut self) {
@@ -1138,6 +1162,10 @@ impl App {
             .filter_map(|entry| {
                 let (workspace_index, pane_id) =
                     self.parse_current_public_pane_id(&entry.source_pane_id)?;
+                let terminal_id = self.state.workspaces[workspace_index].terminal_id(pane_id)?;
+                if !attention_eligible(self.state.terminals.get(terminal_id)?) {
+                    return None;
+                }
                 (!dismissed.contains(&pane_id)).then_some((workspace_index, pane_id, entry.kind))
             })
             .collect::<Vec<_>>();
@@ -1177,6 +1205,12 @@ impl App {
             });
         }
     }
+}
+
+fn attention_eligible(terminal: &TerminalState) -> bool {
+    // Treat agent.start Pi launches as controller-managed, including CLI launches.
+    // Keep lifecycle reporting intact and suppress only automatic dock placement.
+    terminal.managed_agent_kind() != Some(crate::detect::Agent::Pi)
 }
 
 fn exchange_panes_in_tabs(
@@ -1488,6 +1522,152 @@ mod tests {
                 .seen
         );
         super::super::api::test_support::shutdown_test_runtimes(&mut fresh);
+    }
+
+    #[test]
+    fn managed_pi_attention_is_suppressed_until_ownership_is_released() {
+        for next in [AgentState::Blocked, AgentState::Idle] {
+            let (mut state, pane) = state_with_attention();
+            state.remove_attention_entry(pane);
+            let terminal_id = state.workspaces[0].terminal_id(pane).unwrap().clone();
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .begin_managed_agent(
+                    "worker".into(),
+                    crate::detect::Agent::Pi,
+                    Instant::now(),
+                    Duration::ZERO,
+                    Duration::from_secs(30),
+                );
+            state.observe_attention_transition(pane, AgentState::Working, next, false);
+            assert!(state.attention_dock.queue.is_empty());
+
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .restore_managed_agent("worker".into(), crate::detect::Agent::Pi);
+            state.observe_attention_transition(pane, AgentState::Working, next, false);
+            assert!(state.attention_dock.queue.is_empty());
+
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .clear_agent_name();
+            state.observe_attention_transition(pane, AgentState::Working, next, false);
+            assert_eq!(state.attention_dock.queue.len(), 1);
+            state.make_attention_ready_for_test(pane);
+            state.reconcile_attention_dock();
+            assert_eq!(state.docked_attention_pane(), Some(pane));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_handoff_queue_excludes_managed_pi_without_marking_it_unseen() {
+        for kind in [AttentionHandoffKind::Blocked, AttentionHandoffKind::Done] {
+            let mut app = test_app();
+            let (state, pane) = state_with_attention();
+            app.state = state;
+            let terminal_id = app.state.workspaces[0].terminal_id(pane).unwrap().clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .restore_managed_agent("worker".into(), crate::detect::Agent::Pi);
+            let ordinary = app.state.workspaces[1].tabs[0].root_pane;
+            let ordinary_id = app.public_pane_id(1, ordinary).unwrap();
+
+            app.restore_attention_handoff_state(AttentionHandoffState {
+                queue: vec![
+                    AttentionHandoffEntry {
+                        source_pane_id: app.public_pane_id(0, pane).unwrap(),
+                        kind,
+                    },
+                    AttentionHandoffEntry {
+                        source_pane_id: ordinary_id.clone(),
+                        kind,
+                    },
+                ],
+                dismissed_source_pane_ids: vec![],
+            });
+
+            let restored = app.attention_handoff_state();
+            assert_eq!(
+                restored.queue,
+                vec![AttentionHandoffEntry {
+                    source_pane_id: ordinary_id,
+                    kind,
+                }]
+            );
+            assert!(app.state.workspaces[0].tabs[0].panes[&pane].seen);
+        }
+    }
+
+    #[test]
+    fn managed_non_pi_and_named_unmanaged_pi_keep_attention() {
+        for managed in [false, true] {
+            let (mut state, pane) = state_with_attention();
+            state.remove_attention_entry(pane);
+            let terminal_id = state.workspaces[0].terminal_id(pane).unwrap().clone();
+            let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+            if managed {
+                terminal.restore_managed_agent("worker".into(), crate::detect::Agent::Codex);
+            } else {
+                terminal.detected_agent = Some(crate::detect::Agent::Pi);
+                terminal.set_agent_name("interactive".into());
+            }
+            for next in [AgentState::Blocked, AgentState::Idle] {
+                state.remove_attention_entry(pane);
+                state.observe_attention_transition(pane, AgentState::Working, next, false);
+                assert_eq!(state.attention_dock.queue.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn managed_pi_is_pruned_even_when_already_docked_and_focused() {
+        let (mut state, pane) = state_with_attention();
+        let terminal_id = state.workspaces[0].terminal_id(pane).unwrap().clone();
+        state.reconcile_attention_dock();
+        state.focus_pane_in_workspace(1, pane);
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .restore_managed_agent("worker".into(), crate::detect::Agent::Pi);
+
+        state.reconcile_attention_dock();
+
+        assert!(state.attention_dock.queue.is_empty());
+        assert_eq!(state.docked_attention_pane(), None);
+        assert_eq!(state.pane_location(pane), Some((0, 0)));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn handoff_does_not_requeue_managed_pi() {
+        for next in [AgentState::Blocked, AgentState::Idle] {
+            let (mut state, pane) = state_with_attention();
+            let terminal_id = state.workspaces[0].terminal_id(pane).unwrap().clone();
+            let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.restore_managed_agent("worker".into(), crate::detect::Agent::Pi);
+            terminal.state = next;
+            state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&pane)
+                .unwrap()
+                .seen = false;
+
+            state.rebuild_attention_queue_after_handoff();
+
+            assert!(state.attention_dock.queue.is_empty());
+            assert_eq!(state.terminals[&terminal_id].state, next);
+            assert!(state.terminals[&terminal_id].managed_agent_interactive_ready());
+        }
     }
 
     #[test]
