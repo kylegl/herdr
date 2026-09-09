@@ -406,6 +406,18 @@ impl HeadlessServer {
         }
 
         let attention_projection = client_shell_attention_projection(&self.app);
+        // Attention can exchange panes from a timer or lifecycle event, without a client
+        // resize request. Apply controller geometry before publishing that new topology,
+        // including the first frame after dismiss, rather than rendering old-width PTYs.
+        let attention_changed = render_targets.iter().any(|(client_id, _, _, _, mode)| {
+            matches!(mode, ClientConnectionMode::ClientShell)
+                && self.clients.get(client_id).is_some_and(|client| {
+                    client.shell_attention.as_ref() != attention_projection.as_ref()
+                })
+        });
+        if attention_changed {
+            self.reapply_controlled_shell_tab_geometry(false);
+        }
         let mut broken_clients: Vec<u64> = Vec::new();
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
