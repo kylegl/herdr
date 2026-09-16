@@ -1,6 +1,164 @@
 use super::*;
 
 #[test]
+fn attention_focus_survives_completions_queue_arrivals_and_background_tab_closes() {
+    use crate::api::schema::{Method, PaneTarget};
+    use crate::detect::{Agent, AgentState};
+
+    let mut server = test_headless_server();
+    server.app.state.workspaces = ["source", "host", "other"]
+        .map(crate::workspace::Workspace::test_new)
+        .into();
+    for workspace in &mut server.app.state.workspaces[..2] {
+        workspace.test_add_tab(None);
+        workspace.switch_tab(1);
+    }
+    server.app.state.ensure_test_terminals();
+    let attention_pane = server.app.state.workspaces[0].tabs[1].root_pane;
+    let host_pane = server.app.state.workspaces[1].tabs[1].root_pane;
+    let other_pane = server.app.state.workspaces[2].tabs[0].root_pane;
+    server.app.state.active = Some(1);
+    server.app.state.selected = 1;
+    server.app.state.mode = crate::app::Mode::Terminal;
+    server.app.state.toast_config.delay_seconds = 0;
+    let (_control, render) = connect_test_shell(&mut server, 10, 100, 30);
+    let _peer = connect_test_shell(&mut server, 20, 100, 30);
+    let peer_tab = server.app.public_tab_id(2, 0).unwrap();
+    assert!(server.focus_shell_client_on_tab(20, &peer_tab));
+    for (pane_id, state) in [
+        (host_pane, AgentState::Working),
+        (attention_pane, AgentState::Working),
+        (attention_pane, AgentState::Idle),
+    ] {
+        server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Pi),
+            state,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+    }
+    let deadline = server.app.state.next_attention_deadline().unwrap();
+    server.handle_scheduled_tasks_headless(deadline, false);
+    let projection = client_shell_attention_projection(&server.app).unwrap();
+    let (respond_to, response) = std::sync::mpsc::channel();
+    server.handle_client_shell_api_request(
+        10,
+        crate::api::ApiRequestMessage {
+            request: crate::api::schema::Request {
+                id: "focus-attention".into(),
+                method: Method::PaneFocus(PaneTarget {
+                    pane_id: projection.pane_id,
+                }),
+            },
+            respond_to,
+            response_write_complete: None,
+            stream_active: None,
+        },
+    );
+    assert!(response.try_recv().unwrap().contains("\"result\""));
+    assert_eq!(
+        server.app.state.workspaces[1].focused_pane_id(),
+        Some(attention_pane)
+    );
+
+    server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
+        pane_id: host_pane,
+        agent: Some(Agent::Pi),
+        state: AgentState::Idle,
+        visible_blocker: false,
+        visible_working: false,
+        process_exited: false,
+        observed_at: Instant::now(),
+    });
+    server.handle_scheduled_tasks_headless(Instant::now() + Duration::from_secs(2), false);
+    server.render_and_stream();
+    while render.try_recv().is_ok() {}
+    assert_eq!(
+        server.app.state.docked_attention_pane(),
+        Some(attention_pane)
+    );
+    assert_eq!(
+        server.app.state.workspaces[1].focused_pane_id(),
+        Some(attention_pane)
+    );
+    assert_eq!(
+        server.shell_focus_target(10).unwrap().pane_id,
+        attention_pane
+    );
+    server.app.state.assert_invariants_for_test();
+
+    for state in [AgentState::Blocked, AgentState::Working, AgentState::Idle] {
+        server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
+            pane_id: other_pane,
+            agent: Some(Agent::Pi),
+            state,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        server.handle_scheduled_tasks_headless(Instant::now() + Duration::from_secs(2), false);
+        server.render_and_stream();
+        while render.try_recv().is_ok() {}
+        assert_eq!(
+            server.app.state.docked_attention_pane(),
+            Some(attention_pane)
+        );
+        assert_eq!(
+            server.shell_focus_target(10).unwrap().pane_id,
+            attention_pane
+        );
+        server.app.state.assert_invariants_for_test();
+    }
+    // Close tabs preceding both halves of the exchange, then an unrelated last tab.
+    for workspace in [0, 1, 2] {
+        let (respond_to, response) = std::sync::mpsc::channel();
+        let request = crate::api::ApiRequestMessage {
+            request: crate::api::schema::Request {
+                id: "close-background-tab".into(),
+                method: Method::TabClose(crate::api::schema::TabTarget {
+                    tab_id: server.app.public_tab_id(workspace, 0).unwrap(),
+                }),
+            },
+            respond_to,
+            response_write_complete: None,
+            stream_active: None,
+        };
+        if workspace == 2 {
+            // A peer changing its own location must not unpin the owner's attention pane.
+            server.handle_client_shell_api_request(20, request);
+        } else {
+            server.handle_api_request_with_shutdown_check(request);
+        }
+        assert!(response.try_recv().unwrap().contains("\"result\""));
+        server.render_and_stream();
+        assert_eq!(
+            server.app.state.docked_attention_pane(),
+            Some(attention_pane)
+        );
+        assert_eq!(
+            server.shell_focus_target(10).unwrap().pane_id,
+            attention_pane
+        );
+        let projection = server.clients[&10].shell_attention.as_ref().unwrap();
+        assert_eq!(
+            server.clients[&10]
+                .shell_snapshot
+                .as_ref()
+                .unwrap()
+                .focused_pane_id
+                .as_ref(),
+            Some(&projection.pane_id)
+        );
+        server.app.state.assert_invariants_for_test();
+    }
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
 fn attention_sidebar_status_stays_home_as_the_owner_changes_workspaces() {
     use crate::api::schema::{AgentStatus, Method, WorkspaceTarget};
     use crate::detect::{Agent, AgentState};

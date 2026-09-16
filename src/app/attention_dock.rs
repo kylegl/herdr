@@ -106,6 +106,13 @@ pub(crate) struct AttentionHostTarget {
     pub(crate) tab_number: usize,
 }
 
+#[derive(Debug)]
+struct AttentionFocusAfterMutation {
+    pane_id: PaneId,
+    host: AttentionHostTarget,
+    host_focus: PaneId,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AttentionDockState {
     queue: Vec<AttentionEntry>,
@@ -113,6 +120,7 @@ pub(crate) struct AttentionDockState {
     placement: Option<DockPlacement>,
     presented_at_home: Option<PaneId>,
     host: Option<AttentionHostTarget>,
+    focus_after_mutation: Option<AttentionFocusAfterMutation>,
     reconcile_suspended: bool,
     next_sequence: u64,
 }
@@ -124,9 +132,16 @@ impl AppState {
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> bool {
         if self.attention_dock.host == host {
-            return false;
+            if self.attention_dock.focus_after_mutation.is_none() {
+                return false;
+            }
+            // A background topology request can leave the host unchanged but temporarily
+            // undocked. Restore its focus before the server publishes the next projection.
+            self.reconcile_attention_dock_from(terminal_runtimes);
+            return true;
         }
         self.undock_attention();
+        self.attention_dock.focus_after_mutation = None;
         self.attention_dock.host = host;
         self.reconcile_attention_dock_from(terminal_runtimes);
         true
@@ -303,8 +318,30 @@ impl AppState {
             }
         }
 
-        let desired = self.attention_head();
-        if desired.is_some_and(|pane_id| self.pending_agent_notifications.contains_key(&pane_id)) {
+        let restore_focus = self
+            .attention_dock
+            .focus_after_mutation
+            .take()
+            .filter(|focus| {
+                self.attention_dock.host.as_ref() == Some(&focus.host)
+                    && self
+                        .attention_host_location()
+                        .is_some_and(|(ws_idx, _, tab_idx)| {
+                            self.workspaces[ws_idx].tabs[tab_idx].layout.focused()
+                                == focus.host_focus
+                        })
+                    && self
+                        .attention_dock
+                        .queue
+                        .iter()
+                        .any(|entry| entry.pane_id == focus.pane_id)
+            })
+            .map(|focus| focus.pane_id);
+        let desired = restore_focus.or_else(|| self.attention_head());
+        if restore_focus.is_none()
+            && desired
+                .is_some_and(|pane_id| self.pending_agent_notifications.contains_key(&pane_id))
+        {
             return;
         }
         let active_context = self.attention_host_location();
@@ -333,6 +370,9 @@ impl AppState {
         };
         if self.pane_location(attention_pane) == Some((active_ws_idx, dock_tab_idx)) {
             if let Some(tab) = self.workspaces[active_ws_idx].tabs.get_mut(dock_tab_idx) {
+                if restore_focus == Some(attention_pane) {
+                    tab.layout.focus_pane(attention_pane);
+                }
                 for pane in tab.panes.values_mut() {
                     pane.seen = true;
                 }
@@ -398,6 +438,11 @@ impl AppState {
             dock_focus_before_attention: focused,
             cross_workspace_identity,
         });
+        if restore_focus == Some(attention_pane) {
+            self.workspaces[active_ws_idx].tabs[dock_tab_idx]
+                .layout
+                .focus_pane(attention_pane);
+        }
     }
 
     pub(crate) fn dismiss_docked_attention_from(
@@ -634,7 +679,31 @@ impl AppState {
     }
 
     pub(crate) fn prepare_attention_topology_mutation(&mut self) {
+        let focused = self
+            .attention_dock
+            .placement
+            .as_ref()
+            .and_then(|placement| {
+                let (ws_idx, _, tab_idx) = self.attention_host_location()?;
+                (self.workspaces[ws_idx].tabs[tab_idx].layout.focused() == placement.attention_pane)
+                    .then_some(placement.attention_pane)
+            });
         self.undock_attention();
+        if self.attention_dock.placement.is_none() {
+            if let (Some(pane_id), Some(host), Some((ws_idx, _, tab_idx))) = (
+                focused,
+                self.attention_dock.host.clone(),
+                self.attention_host_location(),
+            ) {
+                // Canonicalization is not navigation. Keep the pin across background
+                // mutations, but only while the operation leaves the host's focus alone.
+                self.attention_dock.focus_after_mutation = Some(AttentionFocusAfterMutation {
+                    pane_id,
+                    host,
+                    host_focus: self.workspaces[ws_idx].tabs[tab_idx].layout.focused(),
+                });
+            }
+        }
     }
 
     #[cfg(any(unix, test))]
@@ -2090,20 +2159,26 @@ mod tests {
 
     #[test]
     fn focused_attention_restores_as_soon_as_it_returns_to_working() {
-        let (mut state, attention_pane) = state_with_attention();
-        state.reconcile_attention_dock();
-        state.focus_pane_in_workspace(1, attention_pane);
+        for during_mutation in [false, true] {
+            let (mut state, attention_pane) = state_with_attention();
+            state.reconcile_attention_dock();
+            state.focus_pane_in_workspace(1, attention_pane);
+            if during_mutation {
+                state.prepare_attention_topology_mutation();
+            }
 
-        state.observe_attention_transition(
-            attention_pane,
-            AgentState::Blocked,
-            AgentState::Working,
-            true,
-        );
-        state.reconcile_attention_dock();
+            state.observe_attention_transition(
+                attention_pane,
+                AgentState::Blocked,
+                AgentState::Working,
+                true,
+            );
+            state.reconcile_attention_dock();
 
-        assert_eq!(state.pane_location(attention_pane), Some((0, 0)));
-        assert!(state.attention_dock.placement.is_none());
+            assert_eq!(state.pane_location(attention_pane), Some((0, 0)));
+            assert!(state.attention_dock.placement.is_none());
+            assert!(state.attention_dock.focus_after_mutation.is_none());
+        }
     }
 
     #[test]
@@ -2128,6 +2203,106 @@ mod tests {
 
         assert_eq!(state.pane_location(attention_pane), Some((1, 0)));
         assert_ne!(state.pane_location(blocked_pane), Some((1, 0)));
+
+        state.prepare_attention_topology_mutation();
+        state.reconcile_attention_dock();
+
+        assert_eq!(state.docked_attention_pane(), Some(attention_pane));
+        assert_eq!(state.workspaces[1].focused_pane_id(), Some(attention_pane));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn attention_focus_restoration_does_not_wait_for_a_pending_notification() {
+        let (mut state, attention_pane) = state_with_attention();
+        state.reconcile_attention_dock();
+        state.focus_pane_in_workspace(1, attention_pane);
+        state.toast_config.delay_seconds = 1;
+        state.handle_app_event(crate::events::AppEvent::StateChanged {
+            pane_id: attention_pane,
+            agent: Some(crate::detect::Agent::Pi),
+            state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+        assert!(state
+            .pending_agent_notifications
+            .contains_key(&attention_pane));
+        state.prepare_attention_topology_mutation();
+
+        state.reconcile_attention_dock();
+
+        assert_eq!(state.docked_attention_pane(), Some(attention_pane));
+        assert_eq!(state.workspaces[1].focused_pane_id(), Some(attention_pane));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn attention_focus_survives_background_tab_creation_but_not_explicit_navigation() {
+        for target_ws in [0, 1] {
+            for focus_new_tab in [false, true] {
+                let (mut state, attention_pane) = state_with_attention();
+                state.reconcile_attention_dock();
+                state.focus_pane_in_workspace(1, attention_pane);
+                state.prepare_attention_topology_mutation();
+                let new_tab = state.workspaces[target_ws].test_add_tab(None);
+                let new_pane = state.workspaces[target_ws].tabs[new_tab].root_pane;
+                state.ensure_test_terminals();
+                if focus_new_tab {
+                    state.switch_workspace_tab(target_ws, new_tab);
+                }
+                let ws_idx = state.active.unwrap();
+                let host = AttentionHostTarget {
+                    workspace_id: state.workspaces[ws_idx].id.clone(),
+                    tab_number: state.workspaces[ws_idx].active_tab().unwrap().number,
+                };
+
+                state.set_attention_host(Some(host), &TerminalRuntimeRegistry::new());
+
+                assert_eq!(state.docked_attention_pane(), Some(attention_pane));
+                assert_eq!(
+                    state.workspaces[ws_idx].focused_pane_id(),
+                    Some(if focus_new_tab {
+                        new_pane
+                    } else {
+                        attention_pane
+                    })
+                );
+                state.assert_invariants_for_test();
+                state.prepare_attention_handoff();
+                assert_eq!(state.pane_location(attention_pane), Some((0, 0)));
+                assert!(state.workspaces[target_ws]
+                    .public_pane_number(new_pane)
+                    .is_some());
+                state.assert_invariants_for_test();
+            }
+        }
+    }
+
+    #[test]
+    fn attention_focus_restoration_does_not_override_a_new_focus_in_the_same_tab() {
+        let (mut state, attention_pane) = state_with_attention();
+        state.workspaces[1].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+        state.reconcile_attention_dock();
+        state.focus_pane_in_workspace(1, attention_pane);
+        state.prepare_attention_topology_mutation();
+        let fallback = state.workspaces[1].focused_pane_id().unwrap();
+        let target = state.workspaces[1].tabs[0]
+            .layout
+            .pane_ids()
+            .into_iter()
+            .find(|pane| *pane != fallback)
+            .unwrap();
+        state.focus_pane_in_workspace(1, target);
+
+        state.reconcile_attention_dock();
+
+        assert_eq!(state.workspaces[1].focused_pane_id(), Some(target));
+        assert!(state.attention_dock.focus_after_mutation.is_none());
+        state.assert_invariants_for_test();
     }
 
     #[test]
