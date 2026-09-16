@@ -1701,6 +1701,41 @@
           ],
           "type": "object"
         },
+        "AttentionViewParams": {
+          "description": "A connection-local terminal view. Clearing it does not acknowledge attention.",
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "view_id": {
+              "description": "Client-issued epoch echoed by every frame for this view.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "view_id",
+            "cols",
+            "rows"
+          ],
+          "type": "object"
+        },
         "ClientShellSurfaceSetParams": {
           "description": "Updates whether the requesting client shell receives and controls pane presentation.",
           "properties": {
@@ -4891,6 +4926,54 @@
           "properties": {
             "method": {
               "const": "attention.dismiss",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AttentionTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "attention.view",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AttentionViewParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "attention.acknowledge",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AttentionTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "attention.jump",
               "type": "string"
             },
             "params": {

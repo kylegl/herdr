@@ -368,26 +368,8 @@ impl App {
         let target = self
             .current_plugin_context("custom-command-pane")
             .focused_pane_id;
-        // Canonicalize the dock exchange before the workspace allocates a public pane number.
-        self.state.prepare_attention_topology_mutation();
-        let result = self.spawn_pane_command_after_attention_canonicalization(
-            command,
-            temp_files,
-            target.as_deref(),
-        );
-        if result.is_err() {
-            self.state
-                .reconcile_attention_dock_from(&self.terminal_runtimes);
-        }
-        result
-    }
 
-    fn spawn_pane_command_after_attention_canonicalization(
-        &mut self,
-        command: &str,
-        temp_files: Vec<std::path::PathBuf>,
-        target_pane_id: Option<&str>,
-    ) -> std::io::Result<()> {
+        let target_pane_id = target.as_deref();
         let Some((ws_idx, target_pane)) = target_pane_id
             .and_then(|pane_id| self.parse_pane_id(pane_id))
             .or_else(|| {
@@ -480,30 +462,8 @@ impl App {
         let target = self
             .current_plugin_context("overlay-command-pane")
             .focused_pane_id;
-        // Overlay pane allocation uses the same public-ID counter as durable panes.
-        self.state.prepare_attention_topology_mutation();
-        let result = self.spawn_overlay_argv_command_after_attention_canonicalization(
-            argv,
-            cwd,
-            extra_env,
-            temp_files,
-            target.as_deref(),
-        );
-        if result.is_err() {
-            self.state
-                .reconcile_attention_dock_from(&self.terminal_runtimes);
-        }
-        result
-    }
 
-    fn spawn_overlay_argv_command_after_attention_canonicalization(
-        &mut self,
-        argv: &[String],
-        cwd: Option<std::path::PathBuf>,
-        extra_env: Vec<(String, String)>,
-        temp_files: Vec<std::path::PathBuf>,
-        target_pane_id: Option<&str>,
-    ) -> std::io::Result<(usize, crate::workspace::NewPane)> {
+        let target_pane_id = target.as_deref();
         let Some((ws_idx, target_pane)) = target_pane_id
             .and_then(|pane_id| self.parse_pane_id(pane_id))
             .or_else(|| {
@@ -667,7 +627,7 @@ mod tests {
         app.endpoint_commands = super::EndpointCommandRegistry::new(&[binding]);
     }
 
-    fn app_with_docked_attention() -> (crate::app::App, crate::layout::PaneId) {
+    fn app_with_queued_attention() -> (crate::app::App, crate::layout::PaneId) {
         let mut app = test_app();
         let home = crate::workspace::Workspace::test_new("attention-home");
         let attention_pane = home.tabs[0].root_pane;
@@ -684,8 +644,8 @@ mod tests {
             true,
         );
         app.state.make_attention_ready_for_test(attention_pane);
-        app.state.reconcile_attention_dock();
-        assert!(app.state.workspaces[1].tabs[0]
+        app.state.reconcile_due_attention(std::time::Instant::now());
+        assert!(app.state.workspaces[0].tabs[0]
             .panes
             .contains_key(&attention_pane));
         (app, attention_pane)
@@ -709,9 +669,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_pane_allocation_restores_attention_ids_before_split() {
-        let (mut app, attention_pane) = app_with_docked_attention();
-        app.state.focus_pane_in_workspace(1, attention_pane);
+    async fn custom_pane_allocation_preserves_queued_attention_identity() {
+        let (mut app, attention_pane) = app_with_queued_attention();
+        app.state.focus_pane_in_workspace(0, attention_pane);
 
         app.spawn_pane_command(crate::app::exiting_test_command(), Vec::new())
             .expect("custom pane command");
@@ -729,9 +689,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overlay_allocation_restores_attention_ids_before_split() {
-        let (mut app, attention_pane) = app_with_docked_attention();
-        app.state.focus_pane_in_workspace(1, attention_pane);
+    async fn overlay_allocation_preserves_queued_attention_identity() {
+        let (mut app, attention_pane) = app_with_queued_attention();
+        app.state.focus_pane_in_workspace(0, attention_pane);
         let argv = vec![crate::app::exiting_test_command().to_owned()];
 
         let (_, new_pane) = app
@@ -752,14 +712,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_overlay_command_launch_redocks_ready_attention() {
-        let (mut app, attention_pane) = app_with_docked_attention();
+    async fn failed_overlay_command_launch_preserves_ready_attention() {
+        let (mut app, attention_pane) = app_with_queued_attention();
 
         let result = app.spawn_overlay_argv_command(&[], None, Vec::new(), Vec::new());
 
         assert!(result.is_err());
-        assert_eq!(app.state.docked_attention_pane(), Some(attention_pane));
-        assert!(app.state.workspaces[1].tabs[0]
+        assert_eq!(app.state.attention_entries()[0].pane_id, attention_pane);
+        assert!(app.state.workspaces[0].tabs[0]
             .panes
             .contains_key(&attention_pane));
         app.state.assert_invariants_for_test();

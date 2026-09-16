@@ -58,6 +58,9 @@ const CLIENT_SHELL_METHODS_V1: &[&str] = &[
 const CLIENT_SHELL_METHOD_EXTENSIONS: &[&str] = &[
     crate::protocol::endpoint::ATTENTION_DISMISS_METHOD,
     crate::protocol::endpoint::ATTENTION_OPEN_METHOD,
+    crate::protocol::endpoint::ATTENTION_VIEW_METHOD,
+    crate::protocol::endpoint::ATTENTION_ACKNOWLEDGE_METHOD,
+    crate::protocol::endpoint::ATTENTION_JUMP_METHOD,
 ];
 
 static CLIENT_SHELL_METHODS: std::sync::LazyLock<Vec<&'static str>> =

@@ -556,7 +556,6 @@ impl AppState {
             return false;
         }
 
-        self.prepare_attention_topology_mutation();
         self.mark_session_dirty();
 
         let active_id = self.active.map(|idx| self.workspaces[idx].id.clone());
@@ -616,7 +615,6 @@ impl AppState {
             return false;
         }
 
-        self.prepare_attention_topology_mutation();
         let active_id = self.active.map(|idx| self.workspaces[idx].id.clone());
         let selected_id = self
             .workspaces
@@ -739,7 +737,7 @@ impl AppState {
         if self.workspaces.is_empty() {
             return;
         }
-        self.prepare_attention_topology_mutation();
+
         self.mark_session_dirty();
         let close_indices = self.workspace_close_indices(self.selected);
 
@@ -756,6 +754,9 @@ impl AppState {
             .active
             .and_then(|idx| self.workspaces.get(idx))
             .map(|ws| ws.id.clone());
+        for pane_id in &pane_ids {
+            self.remove_attention_entry(*pane_id);
+        }
         self.remove_plugin_pane_records(pane_ids);
         for idx in close_indices.iter().rev() {
             self.workspaces.remove(*idx);
@@ -1013,12 +1014,6 @@ impl AppState {
             }
         }
 
-        let intended_pane = active
-            .and_then(|ws_idx| self.workspaces.get(ws_idx))
-            .and_then(crate::workspace::Workspace::focused_pane_id);
-        if let Some(pane_id) = intended_pane {
-            self.prepare_attention_pane_mutation(pane_id);
-        }
         self.mark_session_dirty();
         let terminal_ids = active
             .and_then(|i| {
@@ -1036,6 +1031,9 @@ impl AppState {
         let should_close_workspace = active
             .and_then(|i| self.workspaces.get_mut(i))
             .is_some_and(|ws| ws.close_focused());
+        for pane_id in &pane_ids {
+            self.remove_attention_entry(*pane_id);
+        }
         self.remove_plugin_pane_records(pane_ids);
         if should_close_workspace {
             if let Some(active) = active {
@@ -1064,7 +1062,6 @@ impl AppState {
             }
         }
 
-        self.prepare_attention_topology_mutation();
         self.mark_session_dirty();
         let should_close_workspace = self
             .active
@@ -1095,6 +1092,9 @@ impl AppState {
             let closing_tab_id =
                 public_tab_id_for_index(ws, ws.active_tab).unwrap_or_else(|| workspace_id.clone());
             ws.close_active_tab();
+            for pane_id in &pane_ids {
+                self.remove_attention_entry(*pane_id);
+            }
             self.remove_plugin_pane_records(pane_ids);
             self.remove_unattached_terminal_ids(terminal_ids);
             crate::logging::tab_closed(&workspace_id, &closing_tab_id);
@@ -2193,7 +2193,7 @@ impl AppState {
     }
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {
-        self.prepare_attention_pane_mutation(pane_id);
+        self.remove_attention_entry(pane_id);
         self.pending_agent_notifications.remove(&pane_id);
         self.remove_plugin_pane_records([pane_id]);
         let ws_idx = self

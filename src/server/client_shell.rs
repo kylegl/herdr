@@ -3,21 +3,36 @@ use ratatui::layout::Rect;
 use crate::app;
 use crate::protocol::{self, FrameData};
 
-pub(super) fn attention_projection(
-    app: &app::App,
-) -> Option<protocol::endpoint::EndpointAttentionProjection> {
-    let target = app.state.attention_source_target()?;
-    let (dock_ws_idx, _) = app.find_pane(target.pane_id)?;
-    Some(protocol::endpoint::EndpointAttentionProjection {
-        pane_id: app.public_pane_id(dock_ws_idx, target.pane_id)?,
-        source_workspace_id: target.workspace_id.clone(),
-        source_tab_id: crate::workspace::public_tab_id_for_number(
-            &target.workspace_id,
-            target.tab_number,
-        ),
-        source_pane_id: target.public_pane_id,
-        title: app.state.attention_dock_title_for_pane(target.pane_id)?,
-    })
+pub(super) fn attention_queue(app: &app::App) -> Vec<protocol::endpoint::EndpointAttentionEntry> {
+    app.state
+        .attention_entries()
+        .into_iter()
+        .filter_map(|entry| {
+            let target = app.state.attention_target(entry.pane_id)?;
+            let workspace = app
+                .state
+                .workspaces
+                .iter()
+                .find(|ws| ws.id == target.workspace_id)?;
+            Some(protocol::endpoint::EndpointAttentionEntry {
+                pane_id: target.public_pane_id,
+                source_workspace_id: target.workspace_id.clone(),
+                source_tab_id: crate::workspace::public_tab_id_for_number(
+                    &target.workspace_id,
+                    target.tab_number,
+                ),
+                title: workspace.display_name_from(&app.state.terminals, &app.terminal_runtimes),
+                kind: match entry.kind {
+                    crate::app::attention_dock::AttentionHandoffKind::Blocked => {
+                        protocol::endpoint::EndpointAttentionKind::Blocked
+                    }
+                    crate::app::attention_dock::AttentionHandoffKind::Done => {
+                        protocol::endpoint::EndpointAttentionKind::Done
+                    }
+                },
+            })
+        })
+        .collect()
 }
 
 pub(super) fn snapshot(
@@ -26,25 +41,6 @@ pub(super) fn snapshot(
     revision: u64,
     config_diagnostic: Option<&str>,
     location: Option<&crate::server::clients::ClientShellLocation>,
-) -> protocol::ClientShellSnapshot {
-    let attention = attention_projection(app);
-    snapshot_with_attention(
-        app,
-        boot_id,
-        revision,
-        config_diagnostic,
-        location,
-        attention.as_ref(),
-    )
-}
-
-pub(super) fn snapshot_with_attention(
-    app: &app::App,
-    boot_id: &str,
-    revision: u64,
-    config_diagnostic: Option<&str>,
-    location: Option<&crate::server::clients::ClientShellLocation>,
-    attention: Option<&protocol::endpoint::EndpointAttentionProjection>,
 ) -> protocol::ClientShellSnapshot {
     let snapshot = app.session_snapshot();
     let focused_workspace_id = location
@@ -161,7 +157,7 @@ pub(super) fn snapshot_with_attention(
             }
         })
         .collect();
-    let mut agents = snapshot
+    let agents = snapshot
         .agents
         .into_iter()
         .map(|agent| {
@@ -189,20 +185,6 @@ pub(super) fn snapshot_with_attention(
             }
         })
         .collect::<Vec<_>>();
-    if let Some(attention) = attention {
-        if let Some(agent) = agents
-            .iter_mut()
-            .find(|agent| agent.pane_id == attention.pane_id)
-        {
-            // Keep the projected pane ID for input routing, but retain its canonical source
-            // identity for grouped agent labels and source-aware navigation.
-            agent
-                .workspace_id
-                .clone_from(&attention.source_workspace_id);
-            agent.tab_id.clone_from(&attention.source_tab_id);
-        }
-    }
-
     let agent_view_label = app
         .state
         .agent_view_override

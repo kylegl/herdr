@@ -92,6 +92,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn retire_endpoint(&mut self, endpoint_id: &ClientEndpointId) {
+        self.clear_attention_endpoint(endpoint_id);
         self.retire_endpoint_notifications(endpoint_id);
         if let Some(endpoint) = self
             .endpoints
@@ -119,6 +120,9 @@ impl ClientShellState {
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
         {
             endpoint.status = status;
+        }
+        if status != ClientEndpointStatus::Online {
+            self.clear_attention_endpoint(endpoint_id);
         }
     }
 
@@ -170,6 +174,9 @@ impl ClientShellState {
             .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
         {
             endpoint.methods = methods;
+        }
+        if endpoint_id == &self.active_endpoint_id && !self.attention_supported() {
+            self.reset_attention_projection();
         }
     }
 

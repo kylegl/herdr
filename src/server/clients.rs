@@ -30,6 +30,15 @@ pub(crate) enum ClientShellInputTarget {
     Popup(String),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AttentionViewLease {
+    pub(crate) source_pane_id: String,
+    pub(crate) terminal_id: crate::terminal::TerminalId,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+    pub(crate) view_id: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ClientShellPressId {
     PhysicalKey(u32),
@@ -178,7 +187,12 @@ pub(crate) struct ClientConnection {
     /// Last coherent shell replacement sent to this client.
     pub(crate) shell_snapshot: Option<crate::protocol::ClientShellSnapshot>,
     /// Attention metadata sent beside the core generation-1 JSON snapshot.
-    pub(crate) shell_attention: Option<crate::protocol::endpoint::EndpointAttentionProjection>,
+    pub(crate) shell_attention: Vec<crate::protocol::endpoint::EndpointAttentionEntry>,
+    pub(crate) attention_view: Option<AttentionViewLease>,
+    pub(crate) attention_surface: Option<crate::protocol::endpoint::EndpointAttentionSurface>,
+    /// Alternate the two presentation producers sharing the bounded render channel.
+    pub(crate) attention_render_priority: bool,
+    pub(crate) attention_render_pending: bool,
     /// Monotonic shell replacement revision for this connection.
     pub(crate) shell_projection_revision: u64,
     /// Whether this shell is waiting for one ordered endpoint command response.
@@ -246,7 +260,11 @@ impl ClientConnection {
             staged_clipboard_files: Vec::new(),
             shell_location: None,
             shell_snapshot: None,
-            shell_attention: None,
+            shell_attention: Vec::new(),
+            attention_view: None,
+            attention_surface: None,
+            attention_render_priority: false,
+            attention_render_pending: false,
             shell_projection_revision: 0,
             shell_endpoint_command_in_flight: false,
             shell_endpoint_command_surface_revision: None,

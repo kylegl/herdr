@@ -625,7 +625,7 @@ impl HeadlessServer {
                 } else if api_focus_succeeded {
                     self.focus_all_shell_clients_on_default_target();
                 }
-                self.sync_attention_owner();
+                self.reconcile_attention_views();
                 changed
             }
             AppEvent::WorktreeRemoveFinished(result) => {
@@ -653,7 +653,7 @@ impl HeadlessServer {
                 }
                 self.reconcile_client_shell_locations();
                 self.finish_shell_location_reconciliation(focus_before, &focused_tabs_before);
-                self.sync_attention_owner();
+                self.reconcile_attention_views();
                 self.reapply_controlled_shell_tab_geometry(false);
                 for (pane_id, terminal_id) in shutdown_terminals {
                     if self.app.find_pane(pane_id).is_none() {
@@ -701,7 +701,7 @@ impl HeadlessServer {
                 }
                 self.reconcile_client_shell_locations();
                 self.finish_shell_location_reconciliation(focus_before, &focused_tabs_before);
-                self.sync_attention_owner();
+                self.reconcile_attention_views();
                 self.reapply_controlled_shell_tab_geometry(false);
 
                 if self.app.find_pane(pane_id_val).is_none() {

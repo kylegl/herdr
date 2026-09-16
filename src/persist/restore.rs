@@ -1675,14 +1675,8 @@ mod tests {
         assert!(runtimes.is_empty());
 
         let runtime_registry = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
-        let recaptured = super::super::snapshot::capture(
-            &workspaces,
-            &terminals,
-            &runtime_registry,
-            Some(0),
-            0,
-            None,
-        );
+        let recaptured =
+            super::super::snapshot::capture(&workspaces, &terminals, &runtime_registry, Some(0), 0);
         let recaptured_session = recaptured.workspaces[0].tabs[0]
             .panes
             .values()

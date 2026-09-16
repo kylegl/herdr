@@ -344,7 +344,7 @@ impl App {
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
             self.emit_pane_state_update(update);
         }
-        self.state.reconcile_attention_dock();
+        self.state.reconcile_due_attention(Instant::now());
         self.sync_agent_metadata_deadline();
         if let Some((
             overlay,
@@ -956,44 +956,54 @@ impl App {
             Method::NotificationShow(params) => {
                 return self.handle_notification_show(request.id, params);
             }
-            Method::AttentionOpen(params) => {
-                if !self.state.attention_source_matches(&params.source_pane_id) {
-                    return responses::encode_error(
-                        request.id,
-                        "stale_target",
-                        "the attention item is no longer current",
-                    );
-                }
-                return if self.state.open_docked_attention() {
-                    responses::encode_success(request.id, ResponseResult::Ok {})
-                } else {
-                    responses::encode_error(
-                        request.id,
-                        "attention_not_open",
-                        "no focused attention pane is open",
-                    )
-                };
+            Method::AttentionView(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "client_required",
+                    "attention views require an attached client",
+                );
             }
-            Method::AttentionDismiss(params) => {
-                if !self.state.attention_source_matches(&params.source_pane_id) {
+            Method::AttentionOpen(_) | Method::AttentionDismiss(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "stale_target",
+                    "the legacy attention projection is no longer open",
+                );
+            }
+            Method::AttentionAcknowledge(params) => {
+                let target = self
+                    .parse_current_public_pane_id(&params.source_pane_id)
+                    .and_then(|(_, pane_id)| self.state.attention_target(pane_id));
+                let Some(target) = target else {
                     return responses::encode_error(
                         request.id,
                         "stale_target",
-                        "the attention item is no longer current",
+                        "the attention item is no longer queued",
                     );
-                }
-                return if self
-                    .state
-                    .dismiss_docked_attention_from(&self.terminal_runtimes)
-                {
-                    responses::encode_success(request.id, ResponseResult::Ok {})
-                } else {
-                    responses::encode_error(
-                        request.id,
-                        "attention_not_open",
-                        "no attention pane is open",
-                    )
                 };
+                self.state.dismiss_attention(target.pane_id);
+                return responses::encode_success(request.id, ResponseResult::Ok {});
+            }
+            Method::AttentionJump(params) => {
+                let target = self
+                    .parse_current_public_pane_id(&params.source_pane_id)
+                    .and_then(|(_, pane_id)| self.state.attention_target(pane_id));
+                let Some(target) = target else {
+                    return responses::encode_error(
+                        request.id,
+                        "stale_target",
+                        "the attention item is no longer queued",
+                    );
+                };
+                if let Some((ws_idx, _)) = self.find_pane(target.pane_id) {
+                    if let Some(tab_idx) =
+                        self.state.workspaces[ws_idx].find_tab_index_for_pane(target.pane_id)
+                    {
+                        self.state.switch_workspace_tab(ws_idx, tab_idx);
+                        self.state.focus_pane_in_workspace(ws_idx, target.pane_id);
+                    }
+                }
+                return responses::encode_success(request.id, ResponseResult::Ok {});
             }
             Method::ReleaseNotesDismiss(params) => {
                 let Some(notes) = self.state.latest_release_notes.as_ref() else {
@@ -1051,7 +1061,7 @@ impl App {
                 return self.handle_workspace_create(request.id, params);
             }
             Method::WorkspaceFocus(target) => {
-                return self.handle_workspace_focus(request.id, target)
+                return self.handle_workspace_focus(request.id, target);
             }
             Method::WorkspaceRename(params) => {
                 return self.handle_workspace_rename(request.id, params);
@@ -1066,7 +1076,7 @@ impl App {
                 return self.handle_workspace_report_metadata(request.id, params);
             }
             Method::WorkspaceClose(target) => {
-                return self.handle_workspace_close(request.id, target)
+                return self.handle_workspace_close(request.id, target);
             }
             Method::WorktreeList(params) => return self.handle_worktree_list(request.id, params),
             Method::WorktreeCreate(params) => {
@@ -1099,7 +1109,7 @@ impl App {
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
             Method::AgentViewSet(params) => return self.handle_agent_view_set(request.id, params),
             Method::AgentViewClear(params) => {
-                return self.handle_agent_view_clear(request.id, params)
+                return self.handle_agent_view_clear(request.id, params);
             }
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentPrompt(_) => {
@@ -1119,7 +1129,7 @@ impl App {
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
             Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
             Method::AgentSendKeys(params) => {
-                return self.handle_agent_send_keys(request.id, params)
+                return self.handle_agent_send_keys(request.id, params);
             }
             Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
@@ -1208,7 +1218,7 @@ impl App {
             }
             Method::PaneSendText(params) => return self.handle_pane_send_text(request.id, params),
             Method::PaneSendInput(params) => {
-                return self.handle_pane_send_input(request.id, params)
+                return self.handle_pane_send_input(request.id, params);
             }
             Method::PaneClose(target) => return self.handle_pane_close(request.id, target),
             Method::PopupClose(_) => {

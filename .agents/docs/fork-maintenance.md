@@ -5,12 +5,12 @@ This repository is the maintained fork used for two fork-only capabilities:
 1. Herdr's official Pi lifecycle integration consumes the package-neutral
    `herdr:busy` sibling-event overlay and tracks Pi's interactive `ask` tool as
    blocked.
-2. The server automatically presents blocked and unseen-done agents through a
-   transient physical attention pane exchange.
+2. The server queues blocked and unseen-done agents. A sidebar attention count
+   opens an interactive terminal overlay on request, without rearranging panes.
 
 The Pi integration remains part of the Herdr source tree and is installed by the
-Herdr binary. The attention workflow changes core topology, persistence, live
-handoff, and UI behavior; read
+Herdr binary. The attention workflow spans lifecycle, live handoff, endpoint
+streams, and client UI behavior; read
 [`attention-dock-maintenance.md`](attention-dock-maintenance.md) before syncing
 upstream changes in those areas.
 
@@ -140,7 +140,7 @@ After every sync, verify that the Pi integration still:
 5. remains inert outside an eligible Herdr-managed Pi TUI;
 6. preserves socket ordering, retries, reload handling, and platform mapping.
 
-If original Herdr adopts an equivalent busy overlay or automatic attention
+If original Herdr adopts an equivalent busy overlay or attention
 workflow, stop before resolving the overlap. Compare behavior and tests, then
 remove the matching fork patch deliberately rather than carrying both
 implementations.
@@ -207,8 +207,8 @@ three artifacts distinct:
 3. the managed Pi extension written to
    `~/.pi/agent/extensions/herdr-agent-state.ts`.
 
-The automatic attention workflow runs in the Herdr server, so the active server
-and ordinary CLI must use the maintained fork. The Pi lifecycle patch also
+The attention queue runs in the Herdr server and its overlay lives in the TUI,
+so both must use the maintained fork. The Pi lifecycle patch also
 requires the fork binary as integration installer so it writes the version 9 Pi
 asset containing the `herdr:busy` listener and Ask lifecycle tracking.
 
@@ -243,12 +243,13 @@ rg 'HERDR_INTEGRATION_VERSION=9|herdr:busy|tool_execution_start' \
   ~/.pi/agent/extensions/herdr-agent-state.ts
 ```
 
-Then start a new `herdr` client and live-test one fork-only behavior. For the
-automatic attention dock, leave an agent blocked or unseen-done for at least
-300 ms and verify that its real pane appears in the active tab. This runtime
-check is the final deployment gate.
+Then start a new `herdr` client and live-test one fork-only behavior. Leave an
+eligible agent blocked or unseen-done for at least 300 ms. Verify that only the
+sidebar count changes. Open its attention terminal, interact, then close it.
+The underlying pane geometry must stay unchanged and closing must not dismiss
+the queue entry. This runtime check is the final deployment gate.
 
-An upstream Herdr binary lacks the fork's automatic attention workflow and
+An upstream Herdr binary lacks the fork's attention workflow and
 embeds its own Pi asset. Running `herdr integration install pi` through that
 binary can replace the forked integration, and starting it can replace the fork
 server. After Herdr updates, server handoffs, or integration reinstalls, verify

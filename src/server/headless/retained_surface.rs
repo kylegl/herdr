@@ -216,6 +216,15 @@ impl HeadlessServer {
         &mut self,
         pty_sources: &HashSet<crate::layout::PaneId>,
     ) -> bool {
+        if self.clients.values().any(|client| {
+            client.attention_view.as_ref().is_some_and(|lease| {
+                self.app
+                    .parse_pane_id(&lease.source_pane_id)
+                    .is_some_and(|(_, id)| pty_sources.contains(&id))
+            })
+        }) {
+            return false;
+        }
         crate::render_prof::event("retained_surface.attempt");
         let started = crate::render_prof::timer();
         macro_rules! fallback {

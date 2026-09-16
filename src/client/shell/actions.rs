@@ -604,6 +604,17 @@ impl ClientShellState {
         }
         match pending.kind {
             PendingEndpointKind::Generic => {}
+            PendingEndpointKind::AttentionView {
+                source_pane_id,
+                view_id,
+            } => {
+                if result.is_err()
+                    && self.attention_view_id() == view_id
+                    && self.attention_selected() == source_pane_id.as_deref()
+                {
+                    self.hide_attention();
+                }
+            }
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
                 return match result {
                     Ok(_) => (false, Vec::new()),

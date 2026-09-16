@@ -31,6 +31,16 @@ pub struct AttentionTarget {
     pub source_pane_id: String,
 }
 
+/// A connection-local terminal view. Clearing it does not acknowledge attention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AttentionViewParams {
+    /// Client-issued epoch echoed by every frame for this view.
+    pub view_id: u64,
+    pub source_pane_id: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceTarget {
     pub workspace_id: String,

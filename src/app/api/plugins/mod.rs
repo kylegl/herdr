@@ -516,8 +516,6 @@ impl App {
             }
             PluginPanePlacement::Popup => self.open_plugin_popup_pane(id, params, &plugin, pane),
             PluginPanePlacement::Split | PluginPanePlacement::Zoomed | PluginPanePlacement::Tab => {
-                // Capture implicit source identity before canonicalization removes an attention
-                // projection from the owner's physical host workspace.
                 let implicit_context = match placement {
                     PluginPanePlacement::Split | PluginPanePlacement::Zoomed
                         if params.target_pane_id.is_none() =>
@@ -529,8 +527,8 @@ impl App {
                     }
                     _ => None,
                 };
-                self.state.prepare_attention_topology_mutation();
-                let result = match placement {
+
+                match placement {
                     PluginPanePlacement::Split | PluginPanePlacement::Zoomed => self
                         .open_plugin_split_pane(
                             id,
@@ -544,10 +542,7 @@ impl App {
                         self.open_plugin_tab(id, params, &plugin, pane, implicit_context)
                     }
                     _ => unreachable!("durable plugin pane placement"),
-                };
-                self.state
-                    .reconcile_attention_dock_from(&self.terminal_runtimes);
-                result
+                }
             }
         }
     }
@@ -2667,7 +2662,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
     }
 
     #[tokio::test]
-    async fn focused_attention_dock_targets_plugin_actions_at_the_source_public_pane() {
+    async fn focused_queued_attention_targets_plugin_actions_at_the_source_public_pane() {
         let mut app = test_app();
         let home = crate::workspace::Workspace::test_new("voice-target");
         let source_pane = home.tabs[0].root_pane;
@@ -2687,8 +2682,8 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
             true,
         );
         app.state.make_attention_ready_for_test(source_pane);
-        app.state.reconcile_attention_dock();
-        app.state.focus_pane_in_workspace(1, source_pane);
+        app.state.reconcile_due_attention(std::time::Instant::now());
+        app.state.focus_pane_in_workspace(0, source_pane);
 
         let context = app.current_plugin_context("voice-action");
 
@@ -2704,7 +2699,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn implicit_plugin_split_keeps_attention_source_context_and_redocks() {
+    async fn implicit_plugin_split_keeps_attention_source_context_without_dequeuing() {
         let mut app = test_app();
         let home = crate::workspace::Workspace::test_new("plugin-source");
         let source_pane = home.tabs[0].root_pane;
@@ -2726,8 +2721,8 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
             true,
         );
         app.state.make_attention_ready_for_test(source_pane);
-        app.state.reconcile_attention_dock();
-        app.state.focus_pane_in_workspace(1, source_pane);
+        app.state.reconcile_due_attention(std::time::Instant::now());
+        app.state.focus_pane_in_workspace(0, source_pane);
 
         let root = unique_temp_path("plugin-attention-split");
         let capture = root.join("context.json");
@@ -2772,8 +2767,8 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > '{}'; sleep
             panic!("expected plugin pane opened response: {open}");
         };
         assert_eq!(plugin_pane.pane.workspace_id, source_workspace_id);
-        assert_eq!(app.state.docked_attention_pane(), Some(source_pane));
-        assert!(app.state.workspaces[1].tabs[0]
+        assert_eq!(app.state.attention_entries()[0].pane_id, source_pane);
+        assert!(app.state.workspaces[0].tabs[0]
             .panes
             .contains_key(&source_pane));
         let context: crate::api::schema::PluginInvocationContext =
@@ -2796,7 +2791,7 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > '{}'; sleep
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn failed_durable_plugin_launch_redocks_ready_attention() {
+    async fn failed_durable_plugin_launch_preserves_ready_attention() {
         let mut app = test_app();
         let home = crate::workspace::Workspace::test_new("plugin-source");
         let source_pane = home.tabs[0].root_pane;
@@ -2812,8 +2807,8 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_CONTEXT_JSON\" > '{}'; sleep
             true,
         );
         app.state.make_attention_ready_for_test(source_pane);
-        app.state.reconcile_attention_dock();
-        app.state.focus_pane_in_workspace(1, source_pane);
+        app.state.reconcile_due_attention(std::time::Instant::now());
+        app.state.focus_pane_in_workspace(0, source_pane);
         let root = unique_temp_path("plugin-attention-failure");
         write_manifest_content(
             &root,
@@ -2851,8 +2846,8 @@ command = ["/definitely/missing/herdr-plugin-command"]
         });
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&open).unwrap();
         assert_eq!(error.error.code, "plugin_pane_open_failed");
-        assert_eq!(app.state.docked_attention_pane(), Some(source_pane));
-        assert!(app.state.workspaces[1].tabs[0]
+        assert_eq!(app.state.attention_entries()[0].pane_id, source_pane);
+        assert!(app.state.workspaces[0].tabs[0]
             .panes
             .contains_key(&source_pane));
         app.state.assert_invariants_for_test();

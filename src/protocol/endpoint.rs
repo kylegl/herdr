@@ -29,6 +29,10 @@ pub const HEALTH_PING_KIND: &str = "endpoint.health.ping.v1";
 pub const HEALTH_PONG_KIND: &str = "endpoint.health.pong.v1";
 pub const ATTENTION_OPEN_METHOD: &str = "attention.open";
 pub const ATTENTION_DISMISS_METHOD: &str = "attention.dismiss";
+pub const ATTENTION_VIEW_METHOD: &str = "attention.view";
+pub const ATTENTION_ACKNOWLEDGE_METHOD: &str = "attention.acknowledge";
+pub const ATTENTION_JUMP_METHOD: &str = "attention.jump";
+pub const ATTENTION_SURFACE_KIND: &str = "attention.surface.v1";
 
 fn default_true() -> bool {
     true
@@ -65,6 +69,34 @@ pub struct EndpointAttentionProjection {
     pub title: String,
 }
 
+/// Optional JSON queue data, independent of frozen generation-1 binary codecs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointAttentionEntry {
+    pub pane_id: String,
+    pub source_workspace_id: String,
+    pub source_tab_id: String,
+    pub title: String,
+    pub kind: EndpointAttentionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointAttentionKind {
+    Blocked,
+    Done,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A requested terminal view, never the shell's dedicated popup terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointAttentionSurface {
+    pub boot_id: String,
+    pub view_id: u64,
+    pub source_pane_id: String,
+    pub surface: super::ClientShellPopupSurface,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointHandshakeError {
     pub code: String,
@@ -87,18 +119,17 @@ pub struct EndpointServerWelcome {
     pub error: Option<EndpointHandshakeError>,
 }
 
+#[cfg(test)]
 pub fn snapshot_message(snapshot: &ClientShellSnapshot) -> serde_json::Result<ServerMessage> {
-    snapshot_message_with_attention(snapshot, None)
+    snapshot_message_with_attention_queue(snapshot, &[])
 }
 
-pub fn snapshot_message_with_attention(
+pub fn snapshot_message_with_attention_queue(
     snapshot: &ClientShellSnapshot,
-    attention: Option<&EndpointAttentionProjection>,
+    attention_queue: &[EndpointAttentionEntry],
 ) -> serde_json::Result<ServerMessage> {
     let mut data = serde_json::to_value(snapshot)?;
-    if let Some(attention) = attention {
-        data["attention"] = serde_json::to_value(attention)?;
-    }
+    data["attention_queue"] = serde_json::to_value(attention_queue)?;
     Ok(ServerMessage::EndpointControl {
         kind: ENDPOINT_SNAPSHOT_KIND.into(),
         data: serde_json::to_string(&data)?,
@@ -287,6 +318,35 @@ mod tests {
             decoded.commands[0].action,
             crate::protocol::ClientShellCommandAction::Unknown
         );
+    }
+
+    #[test]
+    fn attention_queue_is_optional_to_generation_one_snapshot_readers() {
+        let original = snapshot();
+        let entries = vec![EndpointAttentionEntry {
+            pane_id: "w1:p2".into(),
+            source_workspace_id: "w1".into(),
+            source_tab_id: "w1:t1".into(),
+            title: "approval".into(),
+            kind: EndpointAttentionKind::Blocked,
+        }];
+        let ServerMessage::EndpointControl { data, .. } =
+            snapshot_message_with_attention_queue(&original, &entries).unwrap()
+        else {
+            panic!("expected named JSON snapshot");
+        };
+        assert_eq!(
+            serde_json::from_str::<ClientShellSnapshot>(&data).unwrap(),
+            original
+        );
+        let mut value: serde_json::Value = serde_json::from_str(&data).unwrap();
+        let decoded: Vec<EndpointAttentionEntry> =
+            serde_json::from_value(value["attention_queue"].clone()).unwrap();
+        assert_eq!(decoded, entries);
+        value["attention_queue"][0]["kind"] = serde_json::json!("future_kind");
+        let decoded: Vec<EndpointAttentionEntry> =
+            serde_json::from_value(value["attention_queue"].clone()).unwrap();
+        assert_eq!(decoded[0].kind, EndpointAttentionKind::Unknown);
     }
 
     #[test]

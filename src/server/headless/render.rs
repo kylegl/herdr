@@ -5,6 +5,21 @@ impl HeadlessServer {
         &self,
         client_id: u64,
     ) -> Option<(&crate::terminal::TerminalRuntime, crate::layout::PaneId)> {
+        if let Some(lease) = self.clients.get(&client_id)?.attention_view.as_ref() {
+            let source = &lease.source_pane_id;
+            if self.attention_view_matches(client_id, source) {
+                let (workspace_index, pane_id) = self.app.parse_pane_id(source)?;
+                return self
+                    .app
+                    .state
+                    .runtime_for_pane_in_workspace(
+                        &self.app.terminal_runtimes,
+                        workspace_index,
+                        pane_id,
+                    )
+                    .map(|runtime| (runtime, pane_id));
+            }
+        }
         if self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id) {
             if let Some(popup) = &self.app.state.popup_pane {
                 return self
@@ -46,6 +61,7 @@ impl HeadlessServer {
                     let child_requests_mouse =
                         focused.is_some_and(|(runtime, _)| runtime.mouse_reporting_enabled());
                     let sgr_pixels = client.pixel_mouse
+                        && client.attention_view.is_none()
                         && focused.is_some_and(|(runtime, pane_id)| {
                             self.app.pane_graphics.active_for_pane(pane_id)
                                 && runtime.sgr_pixel_mouse_enabled()
@@ -232,6 +248,12 @@ impl HeadlessServer {
                 if !client.is_active_shell_client() || client.writer.is_none() {
                     continue;
                 }
+                if let Some(lease) = &client.attention_view {
+                    let source = &lease.source_pane_id;
+                    if let Some((_, pane_id)) = self.app.parse_pane_id(source) {
+                        pane_ids.insert(pane_id);
+                    }
+                }
                 let Some(target) = self.shell_target_for_client(client_id) else {
                     continue;
                 };
@@ -350,6 +372,13 @@ impl HeadlessServer {
             if !client.is_active_shell_client() || client.writer.is_none() {
                 return false;
             }
+            if client.attention_view.as_ref().is_some_and(|lease| {
+                self.app
+                    .parse_pane_id(&lease.source_pane_id)
+                    .is_some_and(|(_, id)| id == pane_id)
+            }) {
+                return true;
+            }
             if self
                 .app
                 .state
@@ -405,19 +434,15 @@ impl HeadlessServer {
             return;
         }
 
-        let attention_projection = client_shell_attention_projection(&self.app);
-        // Attention can exchange panes from a timer or lifecycle event, without a client
-        // resize request. Apply controller geometry before publishing that new topology,
-        // including the first frame after dismiss, rather than rendering old-width PTYs.
-        let attention_changed = render_targets.iter().any(|(client_id, _, _, _, mode)| {
-            matches!(mode, ClientConnectionMode::ClientShell)
-                && self.clients.get(client_id).is_some_and(|client| {
-                    client.shell_attention.as_ref() != attention_projection.as_ref()
-                })
-        });
-        if attention_changed {
-            self.reapply_controlled_shell_tab_geometry(false);
+        for client in self.clients.values_mut() {
+            if client.attention_view.is_some() {
+                client.attention_render_priority = !client.attention_render_priority;
+            }
         }
+        // A busy host and a busy attention source share one bounded render lane.
+        // Neither producer may occupy every slot while the other retries forever.
+        self.stream_attention_surfaces(true);
+        let attention_queue = client_shell_attention_queue(&self.app);
         let mut broken_clients: Vec<u64> = Vec::new();
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
@@ -433,13 +458,12 @@ impl HeadlessServer {
                 let Some(client) = self.clients.get_mut(&client_id) else {
                     continue;
                 };
-                let mut candidate = client_shell_snapshot_with_attention(
+                let mut candidate = client_shell_snapshot(
                     &self.app,
                     &self.client_shell_boot_id,
                     client.shell_projection_revision,
                     None,
                     location.as_ref(),
-                    attention_projection.as_ref(),
                 );
                 candidate.config_diagnostic = if client.shell_uses_endpoint_keybindings {
                     self.server_config_diagnostic.clone()
@@ -448,22 +472,23 @@ impl HeadlessServer {
                 };
                 candidate.revision = client.shell_projection_revision;
                 if client.shell_snapshot.as_ref() != Some(&candidate)
-                    || client.shell_attention.as_ref() != attention_projection.as_ref()
+                    || client.shell_attention != attention_queue
                 {
                     client.shell_projection_revision =
                         client.shell_projection_revision.saturating_add(1);
                     candidate.revision = client.shell_projection_revision;
-                    let message = match crate::protocol::endpoint::snapshot_message_with_attention(
-                        &candidate,
-                        attention_projection.as_ref(),
-                    ) {
-                        Ok(message) => message,
-                        Err(err) => {
-                            warn!(client_id, err = %err, "failed to encode endpoint snapshot");
-                            broken_clients.push(client_id);
-                            continue;
-                        }
-                    };
+                    let message =
+                        match crate::protocol::endpoint::snapshot_message_with_attention_queue(
+                            &candidate,
+                            &attention_queue,
+                        ) {
+                            Ok(message) => message,
+                            Err(err) => {
+                                warn!(client_id, err = %err, "failed to encode endpoint snapshot");
+                                broken_clients.push(client_id);
+                                continue;
+                            }
+                        };
                     let framed = match Self::frame_server_message(&message) {
                         Ok(framed) => framed,
                         Err(err) => {
@@ -481,7 +506,7 @@ impl HeadlessServer {
                         continue;
                     }
                     client.shell_snapshot = Some(candidate);
-                    client.shell_attention = attention_projection.clone();
+                    client.shell_attention = attention_queue.clone();
                 }
                 shell_projection_revision = client.shell_projection_revision;
                 if !client.shell_surface_active {
@@ -678,6 +703,7 @@ impl HeadlessServer {
             }
         }
 
+        self.stream_attention_surfaces(false);
         let (cols, rows) = self.effective_size;
         // Full-frame recovery is tracked per connection. A slow client must not
         // keep responsive peers on the global full-render path while it waits

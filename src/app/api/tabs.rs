@@ -45,7 +45,6 @@ impl App {
     }
 
     pub(super) fn handle_tab_create(&mut self, id: String, params: TabCreateParams) -> String {
-        self.state.prepare_attention_topology_mutation();
         let TabCreateParams {
             workspace_id,
             cwd,
@@ -192,7 +191,7 @@ impl App {
             .unwrap_or_else(|| crate::workspace::public_tab_id_for_number(&ws.id, tab_idx + 1));
         let workspace_id = self.public_workspace_id(ws_idx);
         let insert_index = params.insert_index;
-        self.state.prepare_attention_topology_mutation();
+
         let moved = self
             .state
             .workspaces
@@ -219,7 +218,7 @@ impl App {
         let Some((ws_idx, tab_idx)) = self.parse_tab_id(&target.tab_id) else {
             return tab_not_found(id, &target.tab_id);
         };
-        self.state.prepare_attention_topology_mutation();
+
         let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
             return tab_not_found(id, &target.tab_id);
         };
@@ -237,7 +236,8 @@ impl App {
 
         if closes_workspace {
             if self.state.confirm_implicit_worktree_group_close(ws_idx) {
-                self.state.reconcile_attention_dock();
+                self.state
+                    .reconcile_due_attention(std::time::Instant::now());
                 return encode_error(
                     id,
                     "confirmation_required",
@@ -247,6 +247,9 @@ impl App {
             let workspace = self.workspace_info(ws_idx);
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
+            for pane_id in &pane_ids {
+                self.state.remove_attention_entry(*pane_id);
+            }
             self.state.remove_plugin_pane_records(pane_ids);
             self.shutdown_detached_terminal_runtimes();
             self.emit_event(EventEnvelope {
@@ -276,6 +279,9 @@ impl App {
                 format!("tab {} could not be closed", target.tab_id),
             );
         }
+        for pane_id in &pane_ids {
+            self.state.remove_attention_entry(*pane_id);
+        }
         self.state.remove_plugin_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
@@ -287,7 +293,8 @@ impl App {
                 workspace_id,
             },
         });
-        self.state.reconcile_attention_dock();
+        self.state
+            .reconcile_due_attention(std::time::Instant::now());
 
         encode_success(id, ResponseResult::Ok {})
     }

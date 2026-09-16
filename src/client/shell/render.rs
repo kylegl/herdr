@@ -234,12 +234,21 @@ pub(super) struct ShellRenderState<'a> {
 
 pub(super) fn render_shell(
     buffer: &mut Buffer,
-    layout: ClientShellLayout,
+    mut layout: ClientShellLayout,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     mut state: ShellRenderState<'_>,
 ) -> ShellHitMap {
     let mut hits = ShellHitMap::default();
+    if !state.sidebar_collapsed
+        && state
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id)
+            .is_some_and(super::attention::supported)
+    {
+        layout.sidebar.height = layout.sidebar.height.saturating_sub(1);
+    }
     if layout.mobile_header.height > 0 {
         super::mobile::render_mobile_header(
             buffer,

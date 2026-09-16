@@ -665,6 +665,10 @@ impl ClientShellOverlay {
 #[derive(Debug)]
 pub(super) enum PendingEndpointKind {
     Generic,
+    AttentionView {
+        source_pane_id: Option<String>,
+        view_id: u64,
+    },
     ProductAnnouncementDismiss {
         version: String,
         id: String,
@@ -791,6 +795,7 @@ pub(super) enum ClientInputTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ClientInputContext {
+    pub(super) attention_pane_id: Option<String>,
     pub(super) mode: ClientShellMode,
     pub(super) overlay: Option<ClientShellOverlayKind>,
     pub(super) popup_terminal_id: Option<String>,
@@ -890,6 +895,7 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) attention_widget: super::attention::AttentionWidget,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
     pub(super) pane_surface: Option<PaneSurfaceFrame>,
@@ -1040,6 +1046,7 @@ impl ClientShellState {
         }
         Self {
             config,
+            attention_widget: Default::default(),
             snapshot: None,
             pane_surface: None,
             pending_pane_surface: None,
@@ -1292,6 +1299,7 @@ impl ClientShellState {
     }
 
     pub(super) fn reset_endpoint_projection(&mut self) {
+        self.reset_attention_projection();
         self.hits = ShellHitMap::default();
         self.pane_surface = None;
         self.pending_pane_surface = None;

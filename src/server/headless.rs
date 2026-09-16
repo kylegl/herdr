@@ -51,9 +51,8 @@ use crate::server::client_accept::{
     accept_pending_client_connections, reject_pending_client_connections,
 };
 use crate::server::client_shell::{
-    attention_projection as client_shell_attention_projection,
+    attention_queue as client_shell_attention_queue,
     render_pane_surface as render_client_shell_pane_surface, snapshot as client_shell_snapshot,
-    snapshot_with_attention as client_shell_snapshot_with_attention,
 };
 use crate::server::client_transport::ServerEvent;
 use crate::server::clients::{
@@ -73,6 +72,7 @@ use crate::server::socket_paths::{
 };
 use crate::server::terminal_attach::paste_payload_for_runtime;
 
+mod attention;
 mod bootstrap;
 mod client_views;
 mod endpoint_requests;
@@ -210,9 +210,6 @@ pub struct HeadlessServer {
     next_client_id: u64,
     /// The client currently driving session-wide host presentation and side effects.
     foreground_client_id: Option<u64>,
-    /// Stable live shell whose public tab identity hosts the physical attention exchange.
-    /// Unlike foreground selection, this does not change as clients type or render.
-    attention_owner_client_id: Option<u64>,
     /// Panes whose synchronized batch must finish through one coherent full render.
     synchronized_panes_pending_full_render: HashSet<crate::layout::PaneId>,
     /// Ephemeral shell connection controlling PTY geometry for each stable tab id.
@@ -358,7 +355,6 @@ impl HeadlessServer {
             #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
-            attention_owner_client_id: None,
             synchronized_panes_pending_full_render: HashSet::new(),
             tab_geometry_controllers: HashMap::new(),
             popup_owner_tab_id: None,
@@ -1020,12 +1016,9 @@ impl HeadlessServer {
             })
         });
         let was_foreground = self.foreground_client_id == Some(client_id);
-        let was_attention_owner = self.attention_owner_client_id == Some(client_id);
+        self.clear_attention_view(client_id);
         let removed = self.clients.remove(&client_id);
-        if was_attention_owner {
-            self.attention_owner_client_id = None;
-        }
-        let attention_changed = self.sync_attention_owner();
+        let attention_changed = self.reconcile_attention_views();
         self.tab_geometry_controllers
             .retain(|_, controller_id| *controller_id != client_id);
         if let Some(mut removed) = removed {
@@ -2021,14 +2014,13 @@ impl HeadlessServer {
                 );
                 let location =
                     crate::server::clients::ClientShellLocation::from_snapshot(&seed_snapshot);
-                let attention = client_shell_attention_projection(&self.app);
-                let encoded_snapshot = match attention.as_ref() {
-                    Some(attention) => crate::protocol::endpoint::snapshot_message_with_attention(
+                let attention = client_shell_attention_queue(&self.app);
+                let encoded_snapshot =
+                    crate::protocol::endpoint::snapshot_message_with_attention_queue(
                         &seed_snapshot,
-                        Some(attention),
-                    ),
-                    None => crate::protocol::endpoint::snapshot_message(&seed_snapshot),
-                };
+                        &attention,
+                    );
+                connection.shell_attention = attention;
                 let snapshot_message = match encoded_snapshot {
                     Ok(message) => message,
                     Err(err) => {
@@ -2039,7 +2031,7 @@ impl HeadlessServer {
                 connection.shell_location = Some(location);
                 connection.shell_snapshot = Some(seed_snapshot);
                 self.clients.insert(client_id, connection);
-                self.sync_attention_owner();
+                self.reconcile_attention_views();
                 if self.app.state.popup_pane.is_some() && self.popup_owner_tab_id.is_none() {
                     self.popup_owner_tab_id = self.shell_tab_id_for_client(client_id);
                 }
@@ -2389,6 +2381,7 @@ impl HeadlessServer {
                 {
                     return false;
                 }
+                let leased_attention = self.attention_view_matches(client_id, &pane_id);
                 let pixel_mouse = self.clients.get(&client_id).is_some_and(|client| {
                     client.pixel_mouse && client.host_sgr_pixels_active == Some(true)
                 });
@@ -2412,8 +2405,13 @@ impl HeadlessServer {
                 );
                 let popup_blocks_input = self.app.state.popup_pane.is_some()
                     && self.popup_owner_tab_id == self.shell_tab_id_for_client(client_id);
-                if popup_blocks_input
-                    || !self.shell_client_views_pane(client_id, workspace_index, runtime_pane_id)
+                if !leased_attention
+                    && (popup_blocks_input
+                        || !self.shell_client_views_pane(
+                            client_id,
+                            workspace_index,
+                            runtime_pane_id,
+                        ))
                 {
                     let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
                         &self.app.terminal_runtimes,
@@ -2446,10 +2444,12 @@ impl HeadlessServer {
                     client
                         .track_shell_input(ClientShellInputTarget::Pane(pane_id.clone()), &events);
                 }
-                let foreground_changed =
-                    interaction && self.promote_client_to_foreground(client_id);
-                let geometry_changed =
-                    interaction && self.claim_shell_tab_geometry(client_id, false);
+                let foreground_changed = interaction
+                    && !leased_attention
+                    && self.promote_client_to_foreground(client_id);
+                let geometry_changed = interaction
+                    && !leased_attention
+                    && self.claim_shell_tab_geometry(client_id, false);
                 let Some(runtime) = self.app.state.runtime_for_pane_in_workspace(
                     &self.app.terminal_runtimes,
                     workspace_index,
@@ -2650,6 +2650,7 @@ impl HeadlessServer {
                     return false;
                 };
                 client.take_deferred_render() != DeferredRender::None
+                    || client.attention_render_pending
             }
             ServerEvent::QuitSignal => {
                 // The quit check at the top of the loop handles this.
@@ -3334,11 +3335,7 @@ impl HeadlessServer {
             changed = true;
         }
 
-        if self
-            .app
-            .state
-            .reconcile_due_attention(now, &self.app.terminal_runtimes)
-        {
+        if self.app.state.reconcile_due_attention(now) {
             changed = true;
         }
 
@@ -3358,10 +3355,6 @@ impl HeadlessServer {
                     self.forward_agent_notification_delivery(delivery);
                 }
             }
-            // The attention debounce may have elapsed while notification delivery blocked it.
-            self.app
-                .state
-                .reconcile_attention_dock_from(&self.app.terminal_runtimes);
             changed = true;
         }
 

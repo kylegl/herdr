@@ -274,6 +274,7 @@ impl ClientShellState {
             self.hits.tab_scroll_left = Rect::default();
             self.hits.tab_scroll_right = Rect::default();
         }
+        self.attention_widget.row = self.render_attention_row(&mut buffer, layout);
         let mut frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
         let mode_bar_cells = mode_bar.map(|bar| {
             let start = usize::from(bar.y) * usize::from(frame.width) + usize::from(bar.x);
@@ -624,6 +625,7 @@ impl ClientShellState {
             self.hits.popup = None;
         }
         self.compose_graphics(&mut frame, layout);
+        self.compose_attention(&mut frame);
         Some(frame)
     }
 }

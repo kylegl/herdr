@@ -5,6 +5,7 @@ pub(crate) enum EndpointControlMessage {
     Snapshot {
         snapshot: Box<crate::protocol::ClientShellSnapshot>,
         attention: Option<crate::protocol::endpoint::EndpointAttentionProjection>,
+        attention_queue: Vec<crate::protocol::endpoint::EndpointAttentionEntry>,
     },
     Ignored,
 }
@@ -25,11 +26,23 @@ pub(crate) fn decode_endpoint_control(
             .map(serde_json::from_value)
             .transpose()
             .map_err(|error| format!("invalid endpoint attention projection: {error}"))?;
+        let attention_queue = value
+            .get("attention_queue")
+            .cloned()
+            .and_then(|queue| match serde_json::from_value(queue) {
+                Ok(queue) => Some(queue),
+                Err(error) => {
+                    tracing::warn!(%error, "ignoring malformed optional attention queue");
+                    None
+                }
+            })
+            .unwrap_or_default();
         let snapshot = serde_json::from_value(value)
             .map_err(|error| format!("invalid endpoint snapshot: {error}"))?;
         return Ok(EndpointControlMessage::Snapshot {
             snapshot: Box::new(snapshot),
             attention,
+            attention_queue,
         });
     }
     if kind.starts_with("shell.snapshot.") {

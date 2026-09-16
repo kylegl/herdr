@@ -45,9 +45,6 @@ impl HeadlessServer {
             }
         };
 
-        // Runtime pane IDs and the snapshot must be captured from the same
-        // canonical topology before PTY file descriptors are paired.
-        self.app.state.prepare_attention_handoff();
         let mut pane_by_terminal = HashMap::new();
         for ws in &self.app.state.workspaces {
             for tab in &ws.tabs {
@@ -79,7 +76,6 @@ impl HeadlessServer {
             &self.app.terminal_runtimes,
             self.app.state.active,
             self.app.state.selected,
-            None,
         );
 
         let mut handoff_entries = Vec::new();
@@ -292,11 +288,6 @@ impl HeadlessServer {
         if pane_count <= crate::server::handoff::MAX_FDS_PER_HANDOFF {
             return Ok(());
         }
-        // Canonicalization happened before counting. A rejected request keeps this process alive,
-        // so restore the owner's physical dock before returning the error.
-        self.app
-            .state
-            .reconcile_attention_dock_from(&self.app.terminal_runtimes);
         let _ = std::fs::remove_file(socket_path);
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -326,9 +317,6 @@ impl HeadlessServer {
             }
         }
         self.handoff_in_progress = false;
-        self.app
-            .state
-            .reconcile_attention_dock_from(&self.app.terminal_runtimes);
         let _ = std::fs::remove_file(socket_path);
     }
 

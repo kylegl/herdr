@@ -159,6 +159,9 @@ impl ClientShellState {
             outcome.repaint = true;
         }
         for event in events {
+            if self.handle_attention_input(&event, &mut outcome) {
+                continue;
+            }
             if let Some(update) = host_theme_update(&event) {
                 push_host_theme_update(&mut outcome.requests, update);
             }
@@ -336,7 +339,7 @@ impl ClientShellState {
         }
     }
 
-    fn release_input_leases(&mut self, outcome: &mut ClientShellInput) {
+    pub(super) fn release_input_leases(&mut self, outcome: &mut ClientShellInput) {
         for lease in self.input_leases.remove_source(LOCAL_INPUT_SOURCE) {
             self.push_pane_key(
                 lease.target,
@@ -483,6 +486,9 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> Option<ClientInputTarget> {
+        if let Some(pane_id) = self.attention_selected() {
+            return Some(ClientInputTarget::Pane(pane_id.to_owned()));
+        }
         if self.handle_modal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
         {
             return None;
@@ -1138,6 +1144,7 @@ impl ClientShellState {
 
     fn input_context(&self) -> ClientInputContext {
         ClientInputContext {
+            attention_pane_id: self.attention_selected().map(str::to_owned),
             mode: self.mode,
             overlay: self.overlay.as_ref().map(ClientShellOverlay::kind),
             popup_terminal_id: self.popup_input_target().and_then(|target| match target {
@@ -1161,6 +1168,10 @@ impl ClientShellState {
     pub(crate) fn clipboard_image_target(
         &self,
     ) -> Option<crate::protocol::ClientClipboardImageTarget> {
+        if self.attention_open() {
+            // Image upload uses a separate endpoint permission path. Never fall back to host.
+            return None;
+        }
         if matches!(
             self.overlay,
             Some(

@@ -32,7 +32,6 @@ use super::responses::{encode_error, encode_success};
 
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
-        self.state.prepare_attention_topology_mutation();
         let target = if let Some(target_pane_id) = params.target_pane_id.as_deref() {
             self.parse_pane_id(target_pane_id)
         } else if let Some(workspace_id) = params.workspace_id.as_deref() {
@@ -696,7 +695,6 @@ impl App {
     }
 
     pub(super) fn handle_pane_resize(&mut self, id: String, params: PaneResizeParams) -> String {
-        self.state.prepare_attention_topology_mutation();
         let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
@@ -751,7 +749,6 @@ impl App {
     }
 
     pub(super) fn handle_pane_swap(&mut self, id: String, params: PaneSwapParams) -> String {
-        self.state.prepare_attention_topology_mutation();
         let directional = params.direction.is_some();
         let explicit = params.source_pane_id.is_some() || params.target_pane_id.is_some();
         if directional == explicit {
@@ -933,7 +930,7 @@ impl App {
         let Some((_, source_pane_id)) = self.parse_pane_id(&pane_id) else {
             return encode_error(id, "pane_not_found", "source pane not found");
         };
-        self.state.prepare_attention_pane_move(source_pane_id);
+
         let Some((source_ws_idx, _)) = self.find_pane(source_pane_id) else {
             return encode_error(id, "pane_not_found", "source pane not found");
         };
@@ -1346,7 +1343,8 @@ impl App {
             self.emit_layout_updated_snapshot(source_layout);
         }
         self.emit_layout_updated_snapshot((*move_result.target_layout).clone());
-        self.state.reconcile_attention_dock();
+        self.state
+            .reconcile_due_attention(std::time::Instant::now());
 
         encode_success(id, ResponseResult::PaneMove { move_result })
     }
@@ -1392,7 +1390,6 @@ impl App {
     }
 
     pub(super) fn handle_pane_zoom(&mut self, id: String, params: PaneZoomParams) -> String {
-        self.state.prepare_attention_topology_mutation();
         let Some((ws_idx, pane_id)) = self.resolve_optional_pane(params.pane_id.as_deref()) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
@@ -1863,7 +1860,7 @@ impl App {
         let Some((_, pane_id)) = self.parse_pane_id(&target.pane_id) else {
             return Err(pane_not_found(id, &target.pane_id));
         };
-        self.state.prepare_attention_topology_mutation();
+
         let Some((ws_idx, _)) = self.find_pane(pane_id) else {
             return Err(pane_not_found(id, &target.pane_id));
         };
@@ -1875,14 +1872,15 @@ impl App {
         if self.state.close_pane_would_close_workspace(ws_idx, pane_id)
             && self.state.confirm_implicit_worktree_group_close(ws_idx)
         {
-            self.state.reconcile_attention_dock();
+            self.state
+                .reconcile_due_attention(std::time::Instant::now());
             return Err(encode_error(
                 id,
                 "confirmation_required",
                 "closing this pane would close a worktree group",
             ));
         }
-        self.state.prepare_attention_pane_mutation(pane_id);
+        self.state.remove_attention_entry(pane_id);
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
         let should_close_workspace = {
@@ -1925,7 +1923,8 @@ impl App {
                 self.emit_layout_updated_event(ws_idx, tab_idx);
             }
         }
-        self.state.reconcile_attention_dock();
+        self.state
+            .reconcile_due_attention(std::time::Instant::now());
 
         Ok(())
     }

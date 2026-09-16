@@ -362,6 +362,14 @@ fn handle_request(
         );
     }
 
+    if matches!(&request.method, Method::AttentionView(_)) {
+        return error_response_json(
+            request.id,
+            "connection_local_only",
+            "attention.view requires a client shell endpoint".into(),
+        );
+    }
+
     if matches!(&request.method, Method::ServerStop(_)) {
         if let Some(server_stop) = server_stop {
             server_stop.store(true, Ordering::Release);
@@ -393,6 +401,9 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::NotificationShow(_) => "notification.show",
         Method::AttentionOpen(_) => crate::protocol::endpoint::ATTENTION_OPEN_METHOD,
         Method::AttentionDismiss(_) => crate::protocol::endpoint::ATTENTION_DISMISS_METHOD,
+        Method::AttentionView(_) => crate::protocol::endpoint::ATTENTION_VIEW_METHOD,
+        Method::AttentionAcknowledge(_) => crate::protocol::endpoint::ATTENTION_ACKNOWLEDGE_METHOD,
+        Method::AttentionJump(_) => crate::protocol::endpoint::ATTENTION_JUMP_METHOD,
         Method::ProductAnnouncementDismiss(_) => "product_announcement.dismiss",
         Method::ReleaseNotesDismiss(_) => "release_notes.dismiss",
         Method::CommandInvoke(_) => "command.invoke",
@@ -937,6 +948,32 @@ fn caller_timeout_dispatch_uses_timeout_error() {
     );
     let error: ErrorResponse = serde_json::from_str(&response).unwrap();
     assert_eq!(error.error.code, "timeout");
+}
+
+#[cfg(test)]
+#[test]
+fn attention_view_is_not_dispatched_without_a_client_connection() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    for source_pane_id in [Some("w1:p1".into()), None] {
+        let response = handle_request(
+            Request {
+                id: "attention-view".into(),
+                method: Method::AttentionView(crate::api::schema::AttentionViewParams {
+                    view_id: 1,
+                    source_pane_id,
+                    cols: 80,
+                    rows: 24,
+                }),
+            },
+            &tx,
+            None,
+            None,
+            None,
+        );
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "connection_local_only");
+        assert!(rx.try_recv().is_err());
+    }
 }
 
 fn error_response_json(id: String, code: &str, message: String) -> String {

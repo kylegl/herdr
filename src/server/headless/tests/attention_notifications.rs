@@ -1,165 +1,464 @@
 use super::*;
 
-#[test]
-fn attention_focus_survives_completions_queue_arrivals_and_background_tab_closes() {
-    use crate::api::schema::{Method, PaneTarget};
-    use crate::detect::{Agent, AgentState};
-
+fn attention_fixture() -> (HeadlessServer, crate::layout::PaneId, String) {
     let mut server = test_headless_server();
     server.app.state.workspaces = ["source", "host", "other"]
         .map(crate::workspace::Workspace::test_new)
         .into();
-    for workspace in &mut server.app.state.workspaces[..2] {
-        workspace.test_add_tab(None);
-        workspace.switch_tab(1);
-    }
     server.app.state.ensure_test_terminals();
-    let attention_pane = server.app.state.workspaces[0].tabs[1].root_pane;
-    let host_pane = server.app.state.workspaces[1].tabs[1].root_pane;
-    let other_pane = server.app.state.workspaces[2].tabs[0].root_pane;
     server.app.state.active = Some(1);
     server.app.state.selected = 1;
     server.app.state.mode = crate::app::Mode::Terminal;
     server.app.state.toast_config.delay_seconds = 0;
-    let (_control, render) = connect_test_shell(&mut server, 10, 100, 30);
-    let _peer = connect_test_shell(&mut server, 20, 100, 30);
-    let peer_tab = server.app.public_tab_id(2, 0).unwrap();
-    assert!(server.focus_shell_client_on_tab(20, &peer_tab));
-    for (pane_id, state) in [
-        (host_pane, AgentState::Working),
-        (attention_pane, AgentState::Working),
-        (attention_pane, AgentState::Idle),
-    ] {
-        server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
-            pane_id,
-            agent: Some(Agent::Pi),
-            state,
-            visible_blocker: false,
-            visible_working: false,
-            process_exited: false,
-            observed_at: Instant::now(),
-        });
-    }
-    let deadline = server.app.state.next_attention_deadline().unwrap();
-    server.handle_scheduled_tasks_headless(deadline, false);
-    let projection = client_shell_attention_projection(&server.app).unwrap();
+    let pane = server.app.state.workspaces[0].tabs[0].root_pane;
+    queue_blocked(&mut server, pane);
+    let source = server
+        .app
+        .state
+        .attention_target(pane)
+        .unwrap()
+        .public_pane_id;
+    (server, pane, source)
+}
+
+fn queue_blocked(server: &mut HeadlessServer, pane: crate::layout::PaneId) {
+    let (_, state) = server.app.find_pane(pane).unwrap();
+    let terminal = state.attached_terminal_id.clone();
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal)
+        .unwrap()
+        .set_detected_state(
+            Some(crate::detect::Agent::Pi),
+            crate::detect::AgentState::Blocked,
+        );
+    server.app.state.observe_attention_transition(
+        pane,
+        crate::detect::AgentState::Working,
+        crate::detect::AgentState::Blocked,
+        true,
+    );
+    server.app.state.make_attention_ready_for_test(pane);
+}
+
+fn attention_request(
+    server: &mut HeadlessServer,
+    client: u64,
+    method: api::schema::Method,
+) -> String {
     let (respond_to, response) = std::sync::mpsc::channel();
     server.handle_client_shell_api_request(
-        10,
-        crate::api::ApiRequestMessage {
-            request: crate::api::schema::Request {
-                id: "focus-attention".into(),
-                method: Method::PaneFocus(PaneTarget {
-                    pane_id: projection.pane_id,
-                }),
+        client,
+        api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "attention-test".into(),
+                method,
             },
             respond_to,
             response_write_complete: None,
             stream_active: None,
         },
     );
-    assert!(response.try_recv().unwrap().contains("\"result\""));
-    assert_eq!(
-        server.app.state.workspaces[1].focused_pane_id(),
-        Some(attention_pane)
-    );
+    response.try_recv().unwrap()
+}
 
-    server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
-        pane_id: host_pane,
-        agent: Some(Agent::Pi),
-        state: AgentState::Idle,
-        visible_blocker: false,
-        visible_working: false,
-        process_exited: false,
-        observed_at: Instant::now(),
-    });
-    server.handle_scheduled_tasks_headless(Instant::now() + Duration::from_secs(2), false);
-    server.render_and_stream();
-    while render.try_recv().is_ok() {}
+fn view(source: Option<&str>, cols: u16, rows: u16) -> api::schema::Method {
+    api::schema::Method::AttentionView(api::schema::AttentionViewParams {
+        source_pane_id: source.map(str::to_owned),
+        view_id: 1,
+        cols,
+        rows,
+    })
+}
+
+#[test]
+fn attention_queue_and_lease_never_exchange_host_topology_or_focus() {
+    let (mut server, pane, source) = attention_fixture();
+    let _channels = connect_test_shell(&mut server, 10, 100, 30);
+    let _peer = connect_test_shell(&mut server, 20, 70, 20);
+    let focus = server.shell_focus_target(10);
+    let snapshot = serde_json::to_value(server.app.session_snapshot()).unwrap();
+    assert!(attention_request(&mut server, 10, view(Some(&source), 50, 12)).contains("\"result\""));
     assert_eq!(
-        server.app.state.docked_attention_pane(),
-        Some(attention_pane)
+        serde_json::to_value(server.app.session_snapshot()).unwrap(),
+        snapshot
     );
+    let other = server.app.state.workspaces[2].tabs[0].root_pane;
+    queue_blocked(&mut server, other);
     assert_eq!(
-        server.app.state.workspaces[1].focused_pane_id(),
-        Some(attention_pane)
+        server.clients[&10]
+            .attention_view
+            .as_ref()
+            .unwrap()
+            .source_pane_id,
+        source
     );
-    assert_eq!(
-        server.shell_focus_target(10).unwrap().pane_id,
-        attention_pane
+    assert!(server.clients[&20].attention_view.is_none());
+    assert_eq!(server.app.find_pane(pane).unwrap().0, 0);
+    assert_eq!(server.shell_focus_target(10), focus);
+    assert!(attention_request(&mut server, 10, view(None, 0, 0)).contains("\"result\""));
+    assert!(
+        server.app.state.attention_target(pane).is_some(),
+        "close is not acknowledgement"
     );
     server.app.state.assert_invariants_for_test();
-
-    for state in [AgentState::Blocked, AgentState::Working, AgentState::Idle] {
-        server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
-            pane_id: other_pane,
-            agent: Some(Agent::Pi),
-            state,
-            visible_blocker: false,
-            visible_working: false,
-            process_exited: false,
-            observed_at: Instant::now(),
-        });
-        server.handle_scheduled_tasks_headless(Instant::now() + Duration::from_secs(2), false);
-        server.render_and_stream();
-        while render.try_recv().is_ok() {}
-        assert_eq!(
-            server.app.state.docked_attention_pane(),
-            Some(attention_pane)
-        );
-        assert_eq!(
-            server.shell_focus_target(10).unwrap().pane_id,
-            attention_pane
-        );
-        server.app.state.assert_invariants_for_test();
-    }
-    // Close tabs preceding both halves of the exchange, then an unrelated last tab.
-    for workspace in [0, 1, 2] {
-        let (respond_to, response) = std::sync::mpsc::channel();
-        let request = crate::api::ApiRequestMessage {
-            request: crate::api::schema::Request {
-                id: "close-background-tab".into(),
-                method: Method::TabClose(crate::api::schema::TabTarget {
-                    tab_id: server.app.public_tab_id(workspace, 0).unwrap(),
-                }),
-            },
-            respond_to,
-            response_write_complete: None,
-            stream_active: None,
-        };
-        if workspace == 2 {
-            // A peer changing its own location must not unpin the owner's attention pane.
-            server.handle_client_shell_api_request(20, request);
-        } else {
-            server.handle_api_request_with_shutdown_check(request);
-        }
-        assert!(response.try_recv().unwrap().contains("\"result\""));
-        server.render_and_stream();
-        assert_eq!(
-            server.app.state.docked_attention_pane(),
-            Some(attention_pane)
-        );
-        assert_eq!(
-            server.shell_focus_target(10).unwrap().pane_id,
-            attention_pane
-        );
-        let projection = server.clients[&10].shell_attention.as_ref().unwrap();
-        assert_eq!(
-            server.clients[&10]
-                .shell_snapshot
-                .as_ref()
-                .unwrap()
-                .focused_pane_id
-                .as_ref(),
-            Some(&projection.pane_id)
-        );
-        server.app.state.assert_invariants_for_test();
-    }
     shutdown_test_runtimes(&mut server);
 }
 
 #[test]
-fn attention_sidebar_status_stays_home_as_the_owner_changes_workspaces() {
+fn attention_stale_and_legacy_requests_cannot_dismiss_another_source() {
+    let (mut server, pane, source) = attention_fixture();
+    let _channels = connect_test_shell(&mut server, 10, 100, 30);
+    for method in [
+        api::schema::Method::AttentionOpen(api::schema::AttentionTarget {
+            source_pane_id: source.clone(),
+        }),
+        api::schema::Method::AttentionDismiss(api::schema::AttentionTarget {
+            source_pane_id: source.clone(),
+        }),
+        view(Some("missing:p1"), 50, 12),
+    ] {
+        assert!(attention_request(&mut server, 10, method).contains("stale_attention"));
+    }
+    attention_request(&mut server, 10, view(Some(&source), 50, 12));
+    assert!(attention_request(
+        &mut server,
+        10,
+        api::schema::Method::AttentionAcknowledge(api::schema::AttentionTarget {
+            source_pane_id: source.clone()
+        })
+    )
+    .contains("\"result\""));
+    assert!(server.clients[&10].attention_view.is_none());
+    assert!(server.app.state.attention_target(pane).is_none());
+    let other = server.app.state.workspaces[2].tabs[0].root_pane;
+    queue_blocked(&mut server, other);
+    assert!(attention_request(
+        &mut server,
+        10,
+        api::schema::Method::AttentionAcknowledge(api::schema::AttentionTarget {
+            source_pane_id: source
+        })
+    )
+    .contains("stale_attention"));
+    assert!(server.app.state.attention_target(other).is_some());
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn attention_jump_is_client_local_and_deactivation_retires_lease() {
+    let (mut server, pane, source) = attention_fixture();
+    let _channels = connect_test_shell(&mut server, 10, 100, 30);
+    let _peer = connect_test_shell(&mut server, 20, 70, 20);
+    let peer_focus = server.shell_focus_target(20);
+    attention_request(&mut server, 10, view(Some(&source), 50, 12));
+    server.set_client_shell_surface_active(10, false);
+    assert!(server.clients[&10].attention_view.is_none());
+    assert!(!server.attention_view_matches(10, &source));
+    server.set_client_shell_surface_active(10, true);
+    assert!(attention_request(
+        &mut server,
+        10,
+        api::schema::Method::AttentionJump(api::schema::AttentionTarget {
+            source_pane_id: source
+        })
+    )
+    .contains("\"result\""));
+    assert_eq!(server.shell_focus_target(10).unwrap().pane_id, pane);
+    assert_eq!(server.shell_focus_target(20), peer_focus);
+    assert!(server.app.state.attention_target(pane).is_some());
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn attention_geometry_has_one_hidden_owner_and_visible_source_wins() {
+    let (mut server, pane, source) = attention_fixture();
+    for index in 0..2 {
+        let terminal = server.app.state.workspaces[index]
+            .terminal_id(server.app.state.workspaces[index].tabs[0].root_pane)
+            .unwrap()
+            .clone();
+        server.app.terminal_runtimes.insert(
+            terminal,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(100, 30, b"prompt"),
+        );
+    }
+    let owner = connect_test_shell(&mut server, 10, 100, 30);
+    let peer = connect_test_shell(&mut server, 20, 70, 20);
+    let host_pane = server.app.state.workspaces[1].tabs[0].root_pane;
+    let size = |server: &HeadlessServer, index, pane| {
+        server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, index, pane)
+            .unwrap()
+            .current_size()
+    };
+    let host_size = size(&server, 1, host_pane);
+    attention_request(&mut server, 10, view(Some(&source), 50, 12));
+    attention_request(&mut server, 20, view(Some(&source), 40, 10));
+    server.stream_attention_surfaces(false);
+    assert_eq!(size(&server, 0, pane), (12, 50));
+    assert_eq!(size(&server, 1, host_pane), host_size);
+    while owner.1.try_recv().is_ok() {}
+    while peer.1.try_recv().is_ok() {}
+    server.stream_attention_surfaces(false);
+    assert!(owner.1.try_recv().is_err(), "unchanged surface is deduped");
+    let home_tab = server.app.public_tab_id(0, 0).unwrap();
+    server.focus_shell_client_on_tab(20, &home_tab);
+    server.claim_shell_tab_geometry(20, false);
+    let native = size(&server, 0, pane);
+    server.stream_attention_surfaces(false);
+    assert_eq!(size(&server, 0, pane), native);
+    let sent = server.clients[&10].attention_surface.as_ref().unwrap();
+    assert_eq!(
+        (sent.surface.frame.height, sent.surface.frame.width),
+        native
+    );
+    assert_eq!(size(&server, 1, host_pane), host_size);
+    server.app.state.assert_invariants_for_test();
+    shutdown_test_runtimes(&mut server);
+}
+
+#[cfg(unix)]
+#[test]
+fn attention_handoff_rejection_preserves_queue_and_canonical_topology() {
+    let (mut server, pane, source) = attention_fixture();
+    let snapshot = serde_json::to_value(server.app.session_snapshot()).unwrap();
+    let queue = client_shell_attention_queue(&server.app);
+    let path = std::env::temp_dir().join(format!("attention-reject-{}", pane.raw()));
+    assert!(server
+        .reject_over_limit_handoff(crate::server::handoff::MAX_FDS_PER_HANDOFF + 1, &path)
+        .is_err());
+    assert_eq!(client_shell_attention_queue(&server.app), queue);
+    assert_eq!(
+        serde_json::to_value(server.app.session_snapshot()).unwrap(),
+        snapshot
+    );
+    assert_eq!(
+        server
+            .app
+            .state
+            .attention_target(pane)
+            .unwrap()
+            .public_pane_id,
+        source
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn attention_hidden_input_is_leased_without_host_focus_and_released_on_close() {
+    let (mut server, pane, source) = attention_fixture();
+    let terminal = server
+        .app
+        .find_pane(pane)
+        .unwrap()
+        .1
+        .attached_terminal_id
+        .clone();
+    let (runtime, mut input) =
+        crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+            80,
+            24,
+            0,
+            b"\x1b[>3u",
+            8,
+        );
+    server.app.terminal_runtimes.insert(terminal, runtime);
+    let _channels = connect_test_shell(&mut server, 10, 100, 30);
+    let focus = server.shell_focus_target(10);
+    let foreground = server.foreground_client_id;
+    let geometry = server.tab_geometry_controllers.clone();
+    let key = crate::protocol::ClientPaneInputEvent::Key {
+        code: crate::protocol::ClientKeyCode::Char('x'),
+        modifiers: 0,
+        kind: crate::protocol::ClientKeyKind::Press,
+        repeat_count: 1,
+        shifted_codepoint: None,
+        generated_text: None,
+        tracks_release: true,
+        physical_key_id: Some(0x2d),
+        windows_record: None,
+    };
+    server.handle_server_event(ServerEvent::ClientShellPaneInput {
+        client_id: 10,
+        pane_id: source.clone(),
+        events: vec![key.clone()],
+    });
+    assert!(input.try_recv().is_err(), "unleased hidden input rejected");
+    attention_request(&mut server, 10, view(Some(&source), 50, 12));
+    server.handle_server_event(ServerEvent::ClientShellPaneInput {
+        client_id: 10,
+        pane_id: source.clone(),
+        events: vec![key],
+    });
+    assert!(
+        input.try_recv().is_ok(),
+        "leased input reaches native terminal"
+    );
+    assert_eq!(server.shell_focus_target(10), focus);
+    assert_eq!(server.foreground_client_id, foreground);
+    assert_eq!(server.tab_geometry_controllers, geometry);
+    attention_request(&mut server, 10, view(None, 0, 0));
+    assert!(input.try_recv().is_ok(), "closing releases held native key");
+    assert!(server
+        .clients
+        .get_mut(&10)
+        .unwrap()
+        .drain_shell_held_inputs()
+        .is_empty());
+    assert!(server.app.state.attention_target(pane).is_some());
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn attention_full_render_backpressure_retries_without_committing_unsent_frame() {
+    let (mut server, pane, source) = attention_fixture();
+    let terminal = server
+        .app
+        .find_pane(pane)
+        .unwrap()
+        .1
+        .attached_terminal_id
+        .clone();
+    server.app.terminal_runtimes.insert(
+        terminal,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"approval"),
+    );
+    let channels = connect_test_shell(&mut server, 10, 100, 30);
+    attention_request(&mut server, 10, view(Some(&source), 50, 12));
+    server.clients[&10]
+        .writer
+        .as_ref()
+        .unwrap()
+        .render
+        .try_send(vec![0])
+        .unwrap();
+    server.stream_attention_surfaces(false);
+    assert!(server.clients[&10].attention_surface.is_none());
+    assert_eq!(server.clients[&10].deferred_render(), DeferredRender::Full);
+    channels.1.try_recv().unwrap();
+    assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 10 }));
+    server.stream_attention_surfaces(false);
+    assert!(server.clients[&10].attention_surface.is_some());
+    let message = read_server_message(channels.1.try_recv().unwrap());
+    assert!(
+        matches!(message, ServerMessage::EndpointControl { kind, .. } if kind == "attention.surface.v1")
+    );
+    server.stream_attention_surfaces(false);
+    assert!(channels.1.try_recv().is_err());
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn attention_debounce_timer_enqueues_without_moving_source() {
+    let (mut server, pane, _) = attention_fixture();
+    server.app.state.remove_attention_entry(pane);
+    server.app.state.observe_attention_transition(
+        pane,
+        crate::detect::AgentState::Working,
+        crate::detect::AgentState::Blocked,
+        true,
+    );
+    let deadline = server.app.state.next_attention_deadline().unwrap();
+    assert!(client_shell_attention_queue(&server.app).is_empty());
+    server.handle_scheduled_tasks_headless(deadline, false);
+    assert_eq!(client_shell_attention_queue(&server.app).len(), 1);
+    assert_eq!(server.app.find_pane(pane).unwrap().0, 0);
+    server.app.state.assert_invariants_for_test();
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn attention_same_source_reopen_echoes_new_epoch_even_when_cells_match() {
+    let (mut server, pane, source) = attention_fixture();
+    let terminal = server
+        .app
+        .find_pane(pane)
+        .unwrap()
+        .1
+        .attached_terminal_id
+        .clone();
+    server.app.terminal_runtimes.insert(
+        terminal,
+        crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"approval"),
+    );
+    let channels = connect_test_shell(&mut server, 10, 100, 30);
+    for view_id in [7, 8] {
+        let method = api::schema::Method::AttentionView(api::schema::AttentionViewParams {
+            source_pane_id: Some(source.clone()),
+            cols: 50,
+            rows: 12,
+            view_id,
+        });
+        assert!(attention_request(&mut server, 10, method).contains("\"result\""));
+        server.stream_attention_surfaces(false);
+        let ServerMessage::EndpointControl { data, .. } =
+            read_server_message(channels.1.try_recv().unwrap())
+        else {
+            panic!("attention surface");
+        };
+        let surface: protocol::endpoint::EndpointAttentionSurface =
+            serde_json::from_str(&data).unwrap();
+        assert_eq!(surface.boot_id, server.client_shell_boot_id);
+        assert_eq!(surface.view_id, view_id);
+        assert_eq!(surface.source_pane_id, source);
+        attention_request(&mut server, 10, view(None, 0, 0));
+    }
+    shutdown_test_runtimes(&mut server);
+}
+
+#[tokio::test]
+async fn attention_and_busy_host_both_progress_through_one_render_slot() {
+    let (mut server, pane, source) = attention_fixture();
+    let host = server.app.state.workspaces[1].tabs[0].root_pane;
+    for pane in [pane, host] {
+        let terminal = server
+            .app
+            .find_pane(pane)
+            .unwrap()
+            .1
+            .attached_terminal_id
+            .clone();
+        server.app.terminal_runtimes.insert(
+            terminal,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+        );
+    }
+    let channels = connect_test_shell(&mut server, 10, 100, 30);
+    attention_request(&mut server, 10, view(Some(&source), 50, 12));
+    let mut attention_frames = 0;
+    let mut host_frames = 0;
+    for _ in 0..6 {
+        for pane in [pane, host] {
+            let (index, _) = server.app.find_pane(pane).unwrap();
+            server
+                .app
+                .state
+                .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, index, pane)
+                .unwrap()
+                .test_process_pty_bytes(b"x");
+        }
+        server.render_and_stream();
+        match read_server_message(channels.1.try_recv().unwrap()) {
+            ServerMessage::EndpointControl { kind, .. } if kind == "attention.surface.v1" => {
+                attention_frames += 1
+            }
+            ServerMessage::PaneSurface(_) => host_frames += 1,
+            other => panic!("unexpected surface: {other:?}"),
+        }
+        server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 10 });
+    }
+    assert!(attention_frames >= 2, "busy host cannot starve attention");
+    assert!(host_frames >= 2, "busy attention cannot starve host");
+    shutdown_test_runtimes(&mut server);
+}
+
+#[test]
+fn attention_sidebar_status_stays_home_as_client_changes_workspaces() {
     use crate::api::schema::{AgentStatus, Method, WorkspaceTarget};
     use crate::detect::{Agent, AgentState};
 
@@ -234,448 +533,108 @@ fn attention_sidebar_status_stays_home_as_the_owner_changes_workspaces() {
     shutdown_test_runtimes(&mut server);
 }
 
-#[test]
-fn delayed_notification_completion_presents_ready_attention_without_another_event() {
-    let mut server = test_headless_server();
-    let home = crate::workspace::Workspace::test_new("attention-home");
-    let attention_pane = home.tabs[0].root_pane;
-    let host = crate::workspace::Workspace::test_new("attention-host");
-    let target = crate::app::attention_dock::AttentionHostTarget {
-        workspace_id: host.id.clone(),
-        tab_number: host.tabs[0].number,
-    };
-    server.app.state.workspaces = vec![home, host];
-    server.app.state.ensure_test_terminals();
-    server.app.state.active = Some(1);
-    server.app.state.selected = 1;
-    server.app.state.toast_config.delay_seconds = 1;
-    server
-        .app
-        .state
-        .set_attention_host(Some(target), &server.app.terminal_runtimes);
-    server.app.state.handle_app_event(AppEvent::StateChanged {
-        pane_id: attention_pane,
-        agent: Some(crate::detect::Agent::Pi),
-        state: crate::detect::AgentState::Blocked,
-        visible_blocker: false,
-        visible_working: false,
-        process_exited: false,
-        observed_at: Instant::now(),
-    });
-    let attention_deadline = server.app.state.next_attention_deadline().unwrap();
-    let notification_deadline = server
-        .app
-        .state
-        .next_pending_agent_notification_deadline()
-        .unwrap();
-    assert!(attention_deadline < notification_deadline);
-
-    server.handle_scheduled_tasks_headless(attention_deadline, false);
-    assert!(server.app.state.docked_attention_pane().is_none());
-    server.handle_scheduled_tasks_headless(notification_deadline, false);
-
-    assert!(server.app.state.pending_agent_notifications.is_empty());
-    assert_eq!(
-        server.app.state.docked_attention_pane(),
-        Some(attention_pane)
-    );
-    assert!(server.app.state.workspaces[1].tabs[0]
-        .panes
-        .contains_key(&attention_pane));
-    server.app.state.assert_invariants_for_test();
-    shutdown_test_runtimes(&mut server);
-}
-
-#[tokio::test]
-async fn attention_geometry_tracks_debounced_dock_and_dismiss_on_first_frame() {
-    let mut server = test_headless_server();
-    let home = crate::workspace::Workspace::test_new("attention-home");
-    let attention_pane = home.tabs[0].root_pane;
-    let host = crate::workspace::Workspace::test_new("attention-host");
-    let host_pane = host.tabs[0].root_pane;
-    server.app.state.workspaces = vec![home, host];
-    server.app.state.ensure_test_terminals();
-    for (workspace_index, pane_id) in [(0, attention_pane), (1, host_pane)] {
-        let terminal_id = server.app.state.workspaces[workspace_index]
-            .terminal_id(pane_id)
-            .unwrap()
-            .clone();
-        server.app.terminal_runtimes.insert(
-            terminal_id,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(100, 30, b""),
-        );
-    }
-    server.app.state.active = Some(1);
-    server.app.state.selected = 1;
-    server.app.state.mode = crate::app::Mode::Terminal;
-    server.app.state.toast_config.delay_seconds = 0;
-    let (_control, render) = connect_test_shell(&mut server, 10, 100, 30);
-    server.render_and_stream();
-    while render.try_recv().is_ok() {}
-    let initial_size = server
-        .app
-        .state
-        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 1, host_pane)
-        .unwrap()
-        .current_size();
-
-    server.app.state.handle_app_event(AppEvent::StateChanged {
-        pane_id: attention_pane,
-        agent: Some(crate::detect::Agent::Pi),
-        state: crate::detect::AgentState::Blocked,
-        visible_blocker: false,
-        visible_working: false,
-        process_exited: false,
-        observed_at: Instant::now(),
-    });
-    let deadline = server.app.state.next_attention_deadline().unwrap();
-    server.handle_scheduled_tasks_headless(deadline, false);
-    assert_eq!(
-        server.app.state.docked_attention_pane(),
-        Some(attention_pane)
-    );
-    server.render_and_stream();
-    while render.try_recv().is_ok() {}
-
-    let docked_size = server
-        .app
-        .state
-        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 1, attention_pane)
-        .unwrap()
-        .current_size();
-    assert!(
-        docked_size.1 < initial_size.1,
-        "docked PTY must use the split width"
-    );
-    let host_size = server
-        .app
-        .state
-        .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 1, host_pane)
-        .unwrap()
-        .current_size();
-    assert!(host_size.1 < initial_size.1, "host PTY must also shrink");
-    let snapshot = server.clients[&10].shell_snapshot.as_ref().unwrap();
-    assert_eq!(
-        snapshot.workspaces[0].agent_status,
-        crate::api::schema::AgentStatus::Blocked
-    );
-    assert_eq!(
-        snapshot.workspaces[1].agent_status,
-        crate::api::schema::AgentStatus::Unknown
-    );
-    let projection = client_shell_attention_projection(&server.app).unwrap();
-    let (respond_to, response) = std::sync::mpsc::channel();
-    assert!(server.handle_client_shell_api_request(
-        10,
-        crate::api::ApiRequestMessage {
-            request: crate::api::schema::Request {
-                id: "dismiss-attention".into(),
-                method: crate::api::schema::Method::AttentionDismiss(
-                    crate::api::schema::AttentionTarget {
-                        source_pane_id: projection.source_pane_id
-                    },
-                ),
-            },
-            respond_to,
-            response_write_complete: None,
-            stream_active: None,
-        }
-    ));
-    assert!(response.try_recv().unwrap().contains("\"result\""));
-    server.render_and_stream();
-
-    assert!(server.clients[&10].shell_attention.is_none());
-    for (workspace_index, pane_id) in [(0, attention_pane), (1, host_pane)] {
-        let runtime = server
-            .app
-            .state
-            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, workspace_index, pane_id)
-            .unwrap();
-        assert_eq!(
-            runtime.current_size(),
-            initial_size,
-            "dismiss restores geometry without another input or resize event"
-        );
-        assert_eq!(
-            runtime.terminal_dimensions(),
-            Some((initial_size.1, initial_size.0))
-        );
-    }
-    server.app.state.assert_invariants_for_test();
-    shutdown_test_runtimes(&mut server);
-}
-
-#[tokio::test]
-async fn attention_geometry_respects_two_client_controllers_and_restores_on_working() {
-    let mut server = test_headless_server();
-    let home = crate::workspace::Workspace::test_new("attention-home");
-    let attention_pane = home.tabs[0].root_pane;
-    let host = crate::workspace::Workspace::test_new("attention-host");
-    let host_pane = host.tabs[0].root_pane;
-    server.app.state.workspaces = vec![home, host];
-    server.app.state.ensure_test_terminals();
-    for (workspace_index, pane_id) in [(0, attention_pane), (1, host_pane)] {
-        let terminal_id = server.app.state.workspaces[workspace_index]
-            .terminal_id(pane_id)
-            .unwrap()
-            .clone();
-        server.app.terminal_runtimes.insert(
-            terminal_id,
-            crate::terminal::TerminalRuntime::test_with_screen_bytes(100, 30, b""),
-        );
-    }
-    server.app.state.active = Some(1);
-    server.app.state.selected = 1;
-    server.app.state.mode = crate::app::Mode::Terminal;
-    server.app.state.toast_config.delay_seconds = 0;
-    let (_owner_control, owner_render) = connect_test_shell(&mut server, 10, 100, 30);
-    let (_peer_control, peer_render) = connect_test_shell(&mut server, 20, 70, 20);
-    let home_tab = server.app.public_tab_id(0, 0).unwrap();
-    assert!(server.focus_shell_client_on_tab(20, &home_tab));
-    assert!(server.claim_shell_tab_geometry(20, false));
-    server.claim_shell_tab_geometry(10, false);
-    assert!(server.reapply_controlled_shell_tab_geometry(false));
-    let sizes = [(0, attention_pane), (1, host_pane)].map(|(workspace_index, pane_id)| {
-        server
-            .app
-            .state
-            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, workspace_index, pane_id)
-            .unwrap()
-            .current_size()
-    });
-    server.render_and_stream();
-    while owner_render.try_recv().is_ok() {}
-    while peer_render.try_recv().is_ok() {}
-
-    for state in [
-        crate::detect::AgentState::Blocked,
-        crate::detect::AgentState::Working,
-    ] {
-        server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
-            pane_id: attention_pane,
-            agent: Some(crate::detect::Agent::Pi),
-            state,
-            visible_blocker: false,
-            visible_working: false,
-            process_exited: false,
-            observed_at: Instant::now(),
-        });
-        if let Some(deadline) = server.app.state.next_attention_deadline() {
-            server.handle_scheduled_tasks_headless(deadline, false);
-        }
-        server.render_and_stream();
-        while owner_render.try_recv().is_ok() {}
-        while peer_render.try_recv().is_ok() {}
-        if state == crate::detect::AgentState::Blocked {
-            let runtime = server
-                .app
-                .state
-                .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 1, attention_pane)
-                .unwrap();
-            assert!(runtime.current_size().1 < sizes[0].1);
-            let dock_id = &server.clients[&10]
-                .shell_attention
-                .as_ref()
-                .unwrap()
-                .pane_id;
-            let surface = server.clients[&10]
-                .render_state
-                .last_pane_surface()
-                .unwrap();
-            let dock = surface
-                .panes
-                .iter()
-                .find(|pane| &pane.pane_id == dock_id)
-                .unwrap();
-            assert_eq!(
-                runtime.current_size(),
-                (dock.inner_rect.height, dock.inner_rect.width)
-            );
-            assert!(
-                runtime.current_size().0 > sizes[0].0,
-                "dock uses the owner's height, not the source viewer's height"
-            );
-        }
-    }
-    assert!(server.app.state.docked_attention_pane().is_none());
-    for ((workspace_index, pane_id), size) in
-        [(0, attention_pane), (1, host_pane)].into_iter().zip(sizes)
-    {
-        assert_eq!(
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "manual leased-attention render scaling profile"]
+async fn render_scale_profile_attention() {
+    const SAMPLES: usize = 30;
+    const WARMUP: usize = 5;
+    let history: String = (0..1_000)
+        .map(|line| format!("populated terminal line {line}\r\n"))
+        .collect();
+    println!("attention full-render profile: fixed 120x40 host, 80x24 lease, one client");
+    println!("populated background panes exclude the fixed empty host pane");
+    println!("populated_panes leased median_us p95_us median_vs_1x");
+    for leased in [false, true] {
+        let mut baseline_us = 1;
+        for count in [1, 15] {
+            let mut server = test_headless_server();
+            server.app.state.workspaces = (0..count)
+                .map(|index| crate::workspace::Workspace::test_new(&format!("source-{index}")))
+                .collect();
             server
                 .app
                 .state
-                .runtime_for_pane_in_workspace(
-                    &server.app.terminal_runtimes,
-                    workspace_index,
-                    pane_id,
-                )
-                .unwrap()
-                .current_size(),
-            size
-        );
-    }
-    server.app.state.assert_invariants_for_test();
-    shutdown_test_runtimes(&mut server);
-}
-
-#[tokio::test]
-async fn attention_navigation_preserves_hidden_host_size_until_viewed() {
-    use crate::api::schema::{Method, WorkspaceTarget};
-    use crate::detect::{Agent, AgentState};
-
-    for with_peer in [false, true] {
-        let mut server = test_headless_server();
-        server.app.state.workspaces = ["source", "first-host", "second-host"]
-            .map(crate::workspace::Workspace::test_new)
-            .into();
-        server.app.state.ensure_test_terminals();
-        let panes: Vec<_> = server
-            .app
-            .state
-            .workspaces
-            .iter()
-            .map(|workspace| workspace.tabs[0].root_pane)
-            .collect();
-        for (index, pane) in panes.iter().enumerate() {
-            let terminal = server.app.state.workspaces[index]
-                .terminal_id(*pane)
-                .unwrap()
-                .clone();
-            server.app.terminal_runtimes.insert(
-                terminal,
-                crate::terminal::TerminalRuntime::test_with_screen_bytes(100, 30, b""),
-            );
-        }
-        server.app.state.active = Some(1);
-        server.app.state.selected = 1;
-        server.app.state.mode = crate::app::Mode::Terminal;
-        server.app.state.toast_config.delay_seconds = 0;
-        let owner = connect_test_shell(&mut server, 10, 100, 30);
-        let peer = with_peer.then(|| connect_test_shell(&mut server, 20, 70, 20));
-        if with_peer {
-            let home = server.app.public_tab_id(0, 0).unwrap();
-            server.focus_shell_client_on_tab(20, &home);
-            server.claim_shell_tab_geometry(20, false);
-        }
-        let size = |server: &HeadlessServer, index: usize| {
-            server
-                .app
-                .state
-                .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, index, panes[index])
-                .unwrap()
-                .current_size()
-        };
-        let full_size = size(&server, 1);
-        server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
-            pane_id: panes[0],
-            agent: Some(Agent::Pi),
-            state: AgentState::Blocked,
-            visible_blocker: false,
-            visible_working: false,
-            process_exited: false,
-            observed_at: Instant::now(),
-        });
-        let deadline = server.app.state.next_attention_deadline().unwrap();
-        server.handle_scheduled_tasks_headless(deadline, false);
-        server.render_and_stream();
-        let docked_size = size(&server, 1);
-        assert!(docked_size.1 < full_size.1);
-        let first_host_terminal = server.app.state.workspaces[1]
-            .terminal_id(panes[1])
-            .unwrap()
-            .clone();
-        let docked_content_seq = server
-            .app
-            .terminal_runtimes
-            .get(&first_host_terminal)
-            .unwrap()
-            .content_seq();
-
-        for host in [2, 1, 2, 1] {
-            let (respond_to, response) = std::sync::mpsc::channel();
-            let request = crate::api::ApiRequestMessage {
-                request: crate::api::schema::Request {
-                    id: format!("focus-{host}"),
-                    method: Method::WorkspaceFocus(WorkspaceTarget {
-                        workspace_id: server.app.state.workspaces[host].id.clone(),
-                    }),
-                },
-                respond_to,
-                response_write_complete: None,
-                stream_active: None,
-            };
-            // Exercise both public navigation and the client-owned sidebar route.
-            if with_peer {
-                server.handle_client_shell_api_request(10, request);
-            } else {
-                server.handle_api_request_with_shutdown_check(request);
-            }
-            assert!(response.try_recv().unwrap().contains("\"result\""));
-            server.render_and_stream();
-            assert_eq!(
-                size(&server, 1),
-                docked_size,
-                "moving the dock must not expand its now-hidden former host"
-            );
-            assert_eq!(
-                server
+                .workspaces
+                .push(crate::workspace::Workspace::test_new("fixed-host"));
+            server.app.state.ensure_test_terminals();
+            server.app.state.active = Some(count);
+            server.app.state.selected = count;
+            server.app.state.mode = crate::app::Mode::Terminal;
+            for index in 0..count {
+                let pane = server.app.state.workspaces[index].tabs[0].root_pane;
+                let terminal = server
                     .app
-                    .terminal_runtimes
-                    .get(&first_host_terminal)
+                    .find_pane(pane)
                     .unwrap()
-                    .content_seq(),
-                docked_content_seq,
-                "returning must not resize through an intermediate full-width layout"
-            );
-            assert_eq!(size(&server, 2), docked_size);
-            server.app.state.assert_invariants_for_test();
-            while owner.1.try_recv().is_ok() {}
-            if let Some(peer) = &peer {
-                while peer.1.try_recv().is_ok() {}
+                    .1
+                    .attached_terminal_id
+                    .clone();
+                server.app.terminal_runtimes.insert(
+                    terminal,
+                    crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                        120,
+                        40,
+                        1024 * 1024,
+                        history.as_bytes(),
+                    ),
+                );
+                queue_blocked(&mut server, pane);
             }
-        }
-        let second_host_size = if with_peer {
-            // Another viewer makes the former host visible at a different size.
-            let second_host = server.app.public_tab_id(2, 0).unwrap();
-            server.focus_shell_client_on_tab(20, &second_host);
-            server.claim_shell_tab_geometry(20, false);
-            server.reapply_controlled_shell_tab_geometry(false);
-            let layout = crate::ui::compute_tab_surface_for(
-                &server.app.state,
-                &server.app.terminal_runtimes,
-                Some(crate::ui::TabSurfaceTarget {
-                    workspace_index: 2,
-                    tab_index: 0,
-                }),
-                Rect::new(0, 0, 70, 20),
-                false,
-                Default::default(),
+            let pane = server.app.state.workspaces[0].tabs[0].root_pane;
+            let source = server
+                .app
+                .state
+                .attention_target(pane)
+                .unwrap()
+                .public_pane_id;
+            let channels = connect_test_shell(&mut server, 10, 120, 40);
+            if leased {
+                assert!(
+                    attention_request(&mut server, 10, view(Some(&source), 80, 24))
+                        .contains("\"result\"")
+                );
+            }
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for sample in 0..WARMUP + SAMPLES {
+                write_shared_test_pane(
+                    &mut server,
+                    pane,
+                    format!("\rprogress {sample}\x1b[K").as_bytes(),
+                );
+                let started = Instant::now();
+                server.render_and_stream();
+                let elapsed = started.elapsed();
+                if sample >= WARMUP {
+                    samples.push(elapsed);
+                }
+                while let Ok(frame) = channels.1.try_recv() {
+                    std::hint::black_box(frame);
+                }
+                while channels.0.try_recv().is_ok() {}
+                server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 10 });
+            }
+            samples.sort_unstable();
+            let median = samples[SAMPLES / 2].as_micros();
+            let p95 = samples[(SAMPLES - 1) * 95 / 100].as_micros();
+            if count == 1 {
+                baseline_us = median.max(1);
+            }
+            println!(
+                "{count:>15} {leased:>6} {median:>9} {p95:>6} {:>12.2}",
+                median as f64 / baseline_us as f64
             );
-            let rect = layout.pane_infos[0].inner_rect;
-            assert_eq!(size(&server, 2), (rect.height, rect.width));
-            assert_eq!(size(&server, 1), docked_size);
-            size(&server, 2)
-        } else {
-            full_size
-        };
-        server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
-            pane_id: panes[0],
-            agent: Some(Agent::Pi),
-            state: AgentState::Working,
-            visible_blocker: false,
-            visible_working: false,
-            process_exited: false,
-            observed_at: Instant::now(),
-        });
-        server.render_and_stream();
-        assert!(server.app.state.docked_attention_pane().is_none());
-        assert_eq!(
-            size(&server, 1),
-            full_size,
-            "removing the dock must restore its visible host immediately"
-        );
-        assert_eq!(size(&server, 2), second_host_size);
-        shutdown_test_runtimes(&mut server);
+            if leased {
+                let surface = server.clients[&10]
+                    .attention_surface
+                    .as_ref()
+                    .expect("leased surface delivered");
+                assert_eq!(
+                    (surface.surface.frame.width, surface.surface.frame.height),
+                    (80, 24)
+                );
+            }
+            server.app.state.assert_invariants_for_test();
+            shutdown_test_runtimes(&mut server);
+        }
     }
 }

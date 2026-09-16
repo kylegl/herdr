@@ -1802,6 +1802,27 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::EndpointControl { kind, data } => {
+                        if kind == crate::protocol::endpoint::ATTENTION_SURFACE_KIND {
+                            if let Ok(surface) = serde_json::from_str(&data) {
+                                let frame = state.shell.as_mut().and_then(|shell| {
+                                    shell
+                                        .set_attention_surface(&endpoint_id, surface)
+                                        .then(|| {
+                                            shell.compose(
+                                                state.reported_size.0,
+                                                state.reported_size.1,
+                                            )
+                                        })
+                                        .flatten()
+                                });
+                                if let Some(frame) = frame {
+                                    state.present_frame(frame);
+                                }
+                            } else {
+                                debug!("ignoring malformed optional attention surface");
+                            }
+                            continue;
+                        }
                         if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND {
                             let progress = pending_activation.as_mut().map(|activation| {
                                 activation.receive_presentation_effects_ready(
@@ -1823,7 +1844,7 @@ async fn run_client_loop(
                             }
                             continue;
                         }
-                        let (snapshot, attention) =
+                        let (snapshot, attention, attention_queue) =
                             match endpoint::decode_endpoint_control(&kind, &data) {
                                 Ok(endpoint::EndpointControlMessage::HealthPong) => continue,
                                 Ok(endpoint::EndpointControlMessage::Ignored) => {
@@ -1833,7 +1854,8 @@ async fn run_client_loop(
                                 Ok(endpoint::EndpointControlMessage::Snapshot {
                                     snapshot,
                                     attention,
-                                }) => (snapshot, attention),
+                                    attention_queue,
+                                }) => (snapshot, attention, attention_queue),
                                 Err(message)
                                     if federated
                                         || !endpoint::protocol_failure_is_fatal(&endpoint_id) =>
@@ -1865,6 +1887,7 @@ async fn run_client_loop(
                             };
                         if let Some(shell) = state.shell.as_mut() {
                             shell.set_endpoint_attention(&endpoint_id, attention);
+                            shell.set_attention_queue(&endpoint_id, attention_queue);
                         }
                         let projection_pending = activation_message;
                         let activation_progress = activation_message
@@ -2016,6 +2039,7 @@ async fn run_client_loop(
                     let (effects, outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
+                        shell.sync_attention_lease(&mut outcome);
                         for expired in expired_endpoints {
                             if !shell.endpoint_is_active(&expired.endpoint_id) {
                                 continue;

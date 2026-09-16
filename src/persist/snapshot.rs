@@ -260,9 +260,8 @@ pub fn capture(
     terminal_runtimes: &TerminalRuntimeRegistry,
     active: Option<usize>,
     selected: usize,
-    attention_exchange: Option<crate::app::attention_dock::CanonicalAttentionExchange>,
 ) -> SessionSnapshot {
-    let mut snapshot = SessionSnapshot {
+    SessionSnapshot {
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
             .iter()
@@ -273,11 +272,7 @@ pub fn capture(
         sidebar_width: None,
         sidebar_section_split: None,
         collapsed_space_keys: std::collections::HashSet::new(),
-    };
-    if let Some(exchange) = attention_exchange {
-        canonicalize_attention_snapshot(&mut snapshot, &exchange);
     }
-    snapshot
 }
 
 fn capture_workspace(
@@ -399,9 +394,8 @@ fn capture_tab(
 pub fn capture_history(
     workspaces: &[Workspace],
     terminal_runtimes: &TerminalRuntimeRegistry,
-    attention_exchange: Option<crate::app::attention_dock::CanonicalAttentionExchange>,
 ) -> SessionHistorySnapshot {
-    let mut snapshot = SessionHistorySnapshot {
+    SessionHistorySnapshot {
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
             .iter()
@@ -415,290 +409,6 @@ pub fn capture_history(
                     .collect(),
             })
             .collect(),
-    };
-    if let Some(exchange) = attention_exchange {
-        canonicalize_attention_history(&mut snapshot, &exchange);
-    }
-    snapshot
-}
-
-fn canonicalize_attention_snapshot(
-    snapshot: &mut SessionSnapshot,
-    exchange: &crate::app::attention_dock::CanonicalAttentionExchange,
-) {
-    let attention_id = exchange.attention_pane.raw();
-    let displaced_id = exchange.displaced_pane.raw();
-    let Some(attention_location) = snapshot_pane_location(&snapshot.workspaces, attention_id)
-    else {
-        return;
-    };
-    let Some(displaced_location) = snapshot_pane_location(&snapshot.workspaces, displaced_id)
-    else {
-        return;
-    };
-    if attention_location == displaced_location {
-        swap_layout_snapshot_ids(
-            &mut snapshot.workspaces[attention_location.0].tabs[attention_location.1].layout,
-            attention_id,
-            displaced_id,
-        );
-        remove_transient_attention_pane(snapshot, exchange);
-        return;
-    }
-
-    let attention_pane = snapshot.workspaces[attention_location.0].tabs[attention_location.1]
-        .panes
-        .remove(&attention_id);
-    let displaced_pane = snapshot.workspaces[displaced_location.0].tabs[displaced_location.1]
-        .panes
-        .remove(&displaced_id);
-    let (Some(attention_pane), Some(displaced_pane)) = (attention_pane, displaced_pane) else {
-        return;
-    };
-
-    canonicalize_tab_slot(
-        &mut snapshot.workspaces[attention_location.0].tabs[attention_location.1],
-        attention_id,
-        displaced_id,
-    );
-    canonicalize_tab_slot(
-        &mut snapshot.workspaces[displaced_location.0].tabs[displaced_location.1],
-        displaced_id,
-        attention_id,
-    );
-    snapshot.workspaces[attention_location.0].tabs[attention_location.1]
-        .panes
-        .insert(displaced_id, displaced_pane);
-    snapshot.workspaces[displaced_location.0].tabs[displaced_location.1]
-        .panes
-        .insert(attention_id, attention_pane);
-
-    if attention_location.0 != displaced_location.0 {
-        if let (Some(attention_home_number), Some(displaced_home_number)) = (
-            exchange.attention_home_number,
-            exchange.displaced_home_number,
-        ) {
-            snapshot.workspaces[attention_location.0]
-                .public_pane_numbers
-                .remove(&attention_id);
-            snapshot.workspaces[attention_location.0]
-                .public_pane_numbers
-                .insert(displaced_id, displaced_home_number);
-            snapshot.workspaces[displaced_location.0]
-                .public_pane_numbers
-                .remove(&displaced_id);
-            snapshot.workspaces[displaced_location.0]
-                .public_pane_numbers
-                .insert(attention_id, attention_home_number);
-        }
-    }
-    remove_transient_attention_pane(snapshot, exchange);
-}
-
-fn remove_transient_attention_pane(
-    snapshot: &mut SessionSnapshot,
-    exchange: &crate::app::attention_dock::CanonicalAttentionExchange,
-) {
-    let Some(transient_pane) = exchange.transient_pane else {
-        return;
-    };
-    let transient_id = transient_pane.raw();
-    if let Some(next_public_pane_number) = exchange.attention_home_next_public_pane_number {
-        for workspace in &mut snapshot.workspaces {
-            if workspace
-                .tabs
-                .iter()
-                .any(|tab| tab.panes.contains_key(&exchange.attention_pane.raw()))
-            {
-                workspace.next_public_pane_number = next_public_pane_number;
-                break;
-            }
-        }
-    }
-    for workspace in &mut snapshot.workspaces {
-        workspace.public_pane_numbers.remove(&transient_id);
-        for tab in &mut workspace.tabs {
-            if !tab.panes.contains_key(&transient_id) {
-                continue;
-            }
-            tab.panes.remove(&transient_id);
-            if let Some(next_public_pane_number) = exchange.transient_home_next_public_pane_number {
-                workspace.next_public_pane_number = next_public_pane_number;
-            }
-            let old = std::mem::replace(&mut tab.layout, LayoutSnapshot::Pane(transient_id));
-            if let Some(layout) = remove_layout_snapshot_pane(old, transient_id) {
-                tab.layout = layout;
-            }
-            if tab.focused == Some(transient_id) {
-                tab.focused = first_pane_id_in_layout(&tab.layout);
-            }
-            if tab.root_pane == Some(transient_id) {
-                tab.root_pane = first_pane_id_in_layout(&tab.layout);
-            }
-            return;
-        }
-    }
-}
-
-fn remove_layout_snapshot_pane(layout: LayoutSnapshot, target: u32) -> Option<LayoutSnapshot> {
-    match layout {
-        LayoutSnapshot::Pane(id) if id == target => None,
-        LayoutSnapshot::Pane(id) => Some(LayoutSnapshot::Pane(id)),
-        LayoutSnapshot::Split {
-            direction,
-            ratio,
-            first,
-            second,
-        } => match (
-            remove_layout_snapshot_pane(*first, target),
-            remove_layout_snapshot_pane(*second, target),
-        ) {
-            (Some(first), Some(second)) => Some(LayoutSnapshot::Split {
-                direction,
-                ratio,
-                first: Box::new(first),
-                second: Box::new(second),
-            }),
-            (Some(child), None) | (None, Some(child)) => Some(child),
-            (None, None) => None,
-        },
-    }
-}
-
-fn canonicalize_attention_history(
-    snapshot: &mut SessionHistorySnapshot,
-    exchange: &crate::app::attention_dock::CanonicalAttentionExchange,
-) {
-    let attention_id = exchange.attention_pane.raw();
-    let displaced_id = exchange.displaced_pane.raw();
-    let Some(attention_location) = history_pane_location(&snapshot.workspaces, attention_id) else {
-        return;
-    };
-    if exchange.transient_pane.is_some() {
-        let Some(home_ws_idx) = exchange.attention_home_ws_idx else {
-            return;
-        };
-        let Some(home_tab_idx) = exchange.attention_home_tab_idx else {
-            return;
-        };
-        let attention_history = snapshot.workspaces[attention_location.0].tabs
-            [attention_location.1]
-            .panes
-            .remove(&attention_id);
-        if let (Some(home_tab), Some(history)) = (
-            snapshot
-                .workspaces
-                .get_mut(home_ws_idx)
-                .and_then(|workspace| workspace.tabs.get_mut(home_tab_idx)),
-            attention_history,
-        ) {
-            home_tab.panes.insert(attention_id, history);
-        }
-        remove_transient_attention_history(snapshot, exchange);
-        return;
-    }
-    let Some(displaced_location) = history_pane_location(&snapshot.workspaces, displaced_id) else {
-        return;
-    };
-    if attention_location == displaced_location {
-        remove_transient_attention_history(snapshot, exchange);
-        return;
-    }
-    let attention_history = snapshot.workspaces[attention_location.0].tabs[attention_location.1]
-        .panes
-        .remove(&attention_id);
-    let displaced_history = snapshot.workspaces[displaced_location.0].tabs[displaced_location.1]
-        .panes
-        .remove(&displaced_id);
-    if let Some(history) = attention_history {
-        snapshot.workspaces[displaced_location.0].tabs[displaced_location.1]
-            .panes
-            .insert(attention_id, history);
-    }
-    if let Some(history) = displaced_history {
-        snapshot.workspaces[attention_location.0].tabs[attention_location.1]
-            .panes
-            .insert(displaced_id, history);
-    }
-    remove_transient_attention_history(snapshot, exchange);
-}
-
-fn remove_transient_attention_history(
-    snapshot: &mut SessionHistorySnapshot,
-    exchange: &crate::app::attention_dock::CanonicalAttentionExchange,
-) {
-    let Some(transient_pane) = exchange.transient_pane else {
-        return;
-    };
-    for workspace in &mut snapshot.workspaces {
-        for tab in &mut workspace.tabs {
-            tab.panes.remove(&transient_pane.raw());
-        }
-    }
-}
-
-fn snapshot_pane_location(
-    workspaces: &[WorkspaceSnapshot],
-    pane_id: u32,
-) -> Option<(usize, usize)> {
-    workspaces
-        .iter()
-        .enumerate()
-        .find_map(|(ws_idx, workspace)| {
-            workspace
-                .tabs
-                .iter()
-                .position(|tab| tab.panes.contains_key(&pane_id))
-                .map(|tab_idx| (ws_idx, tab_idx))
-        })
-}
-
-fn history_pane_location(
-    workspaces: &[WorkspaceHistorySnapshot],
-    pane_id: u32,
-) -> Option<(usize, usize)> {
-    workspaces
-        .iter()
-        .enumerate()
-        .find_map(|(ws_idx, workspace)| {
-            workspace
-                .tabs
-                .iter()
-                .position(|tab| tab.panes.contains_key(&pane_id))
-                .map(|tab_idx| (ws_idx, tab_idx))
-        })
-}
-
-fn canonicalize_tab_slot(tab: &mut TabSnapshot, current: u32, replacement: u32) {
-    replace_layout_snapshot_id(&mut tab.layout, current, replacement);
-    if tab.focused == Some(current) {
-        tab.focused = Some(replacement);
-    }
-    if tab.root_pane == Some(current) {
-        tab.root_pane = Some(replacement);
-    }
-}
-
-fn replace_layout_snapshot_id(layout: &mut LayoutSnapshot, current: u32, replacement: u32) {
-    match layout {
-        LayoutSnapshot::Pane(id) if *id == current => *id = replacement,
-        LayoutSnapshot::Pane(_) => {}
-        LayoutSnapshot::Split { first, second, .. } => {
-            replace_layout_snapshot_id(first, current, replacement);
-            replace_layout_snapshot_id(second, current, replacement);
-        }
-    }
-}
-
-fn swap_layout_snapshot_ids(layout: &mut LayoutSnapshot, first_id: u32, second_id: u32) {
-    match layout {
-        LayoutSnapshot::Pane(id) if *id == first_id => *id = second_id,
-        LayoutSnapshot::Pane(id) if *id == second_id => *id = first_id,
-        LayoutSnapshot::Pane(_) => {}
-        LayoutSnapshot::Split { first, second, .. } => {
-            swap_layout_snapshot_ids(first, first_id, second_id);
-            swap_layout_snapshot_ids(second, first_id, second_id);
-        }
     }
 }
 
@@ -837,7 +547,6 @@ mod tests {
             terminal_runtimes,
             state.active,
             state.selected,
-            state.canonical_attention_exchange(),
         )
     }
 
@@ -845,11 +554,7 @@ mod tests {
         state: &AppState,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> SessionHistorySnapshot {
-        capture_history(
-            &state.workspaces,
-            terminal_runtimes,
-            state.canonical_attention_exchange(),
-        )
+        capture_history(&state.workspaces, terminal_runtimes)
     }
 
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {

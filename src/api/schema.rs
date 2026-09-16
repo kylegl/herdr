@@ -63,6 +63,12 @@ pub enum Method {
     AttentionOpen(AttentionTarget),
     #[serde(rename = "attention.dismiss")]
     AttentionDismiss(AttentionTarget),
+    #[serde(rename = "attention.view")]
+    AttentionView(AttentionViewParams),
+    #[serde(rename = "attention.acknowledge")]
+    AttentionAcknowledge(AttentionTarget),
+    #[serde(rename = "attention.jump")]
+    AttentionJump(AttentionTarget),
     #[serde(rename = "product_announcement.dismiss")]
     ProductAnnouncementDismiss(ProductAnnouncementDismissParams),
     #[serde(rename = "release_notes.dismiss")]

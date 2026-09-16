@@ -91,36 +91,6 @@ impl HeadlessServer {
             .and_then(|target| self.tab_id_for_target(target))
     }
 
-    pub(super) fn sync_attention_owner(&mut self) -> bool {
-        let owner_is_live = self.attention_owner_client_id.is_some_and(|client_id| {
-            self.clients
-                .get(&client_id)
-                .is_some_and(|client| client.is_shell_client() && client.writer.is_some())
-        });
-        if !owner_is_live {
-            self.attention_owner_client_id = self
-                .clients
-                .iter()
-                .filter(|(_, client)| client.is_shell_client() && client.writer.is_some())
-                .map(|(&client_id, _)| client_id)
-                .min();
-        }
-        let host = self
-            .attention_owner_client_id
-            .and_then(|client_id| self.shell_target_for_client(client_id))
-            .and_then(|target| {
-                let workspace = self.app.state.workspaces.get(target.workspace_index)?;
-                let tab = workspace.tabs.get(target.tab_index)?;
-                Some(crate::app::attention_dock::AttentionHostTarget {
-                    workspace_id: workspace.id.clone(),
-                    tab_number: tab.number,
-                })
-            });
-        self.app
-            .state
-            .set_attention_host(host, &self.app.terminal_runtimes)
-    }
-
     fn client_shell_topology(&self) -> ClientShellTopology {
         let focused_workspace_id = self
             .app
@@ -601,10 +571,7 @@ impl HeadlessServer {
             crate::kitty_graphics::HostCellSize::default()
         };
         let area = Rect::new(0, 0, cols, rows);
-        // A moving attention split must not expand its hidden former host only to
-        // shrink it again on return. Keep hidden PTYs at their last size while the
-        // dock is open; a viewer or dock removal reapplies their current layout.
-        if self.app_client_count() == 1 && self.app.state.docked_attention_pane().is_none() {
+        if self.app_client_count() == 1 {
             for (workspace_index, workspace) in self.app.state.workspaces.iter().enumerate() {
                 for tab_index in 0..workspace.tabs.len() {
                     crate::ui::resize_tab_surface(
@@ -692,10 +659,6 @@ impl HeadlessServer {
         let mut controlled_tabs = self
             .tab_geometry_controllers
             .iter()
-            .filter(|(tab_id, _)| {
-                self.app.state.docked_attention_pane().is_none()
-                    || viewed_tabs.contains_key(*tab_id)
-            })
             .filter_map(|(tab_id, &client_id)| {
                 self.app
                     .parse_tab_id(tab_id)
@@ -905,119 +868,10 @@ impl HeadlessServer {
         if reconcile || target_changed || self.app.state.popup_pane.is_some() != popup_before {
             self.reconcile_client_shell_locations();
         }
-        let attention_changed = self.sync_attention_owner();
+        let attention_changed = self.reconcile_attention_views();
         let geometry_changed =
             method_claims_geometry && self.reapply_controlled_shell_tab_geometry(false);
         changed | geometry_changed | attention_changed
-    }
-
-    fn handle_client_shell_attention_request(
-        &mut self,
-        client_id: u64,
-        msg: api::ApiRequestMessage,
-    ) -> bool {
-        use crate::api::schema::{
-            ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
-        };
-
-        let focus_before = self.shell_focus_target(client_id);
-        let focused_tabs_before = self.focused_shell_tabs();
-        let changed = match msg.request.method {
-            Method::AttentionOpen(params) => {
-                if !self
-                    .app
-                    .state
-                    .attention_source_matches(&params.source_pane_id)
-                {
-                    let response = ErrorResponse {
-                        id: msg.request.id,
-                        error: ErrorBody {
-                            code: "stale_target".to_owned(),
-                            message: "the attention item is no longer current".to_owned(),
-                        },
-                    };
-                    if let Ok(encoded) = serde_json::to_string(&response) {
-                        let _ = msg.respond_to.send(encoded);
-                    }
-                    return false;
-                }
-                let Some(target) = self.app.state.restore_docked_attention_home() else {
-                    let response = ErrorResponse {
-                        id: msg.request.id,
-                        error: ErrorBody {
-                            code: "attention_not_open".to_owned(),
-                            message: "no attention pane is open".to_owned(),
-                        },
-                    };
-                    if let Ok(encoded) = serde_json::to_string(&response) {
-                        let _ = msg.respond_to.send(encoded);
-                    }
-                    return false;
-                };
-                let tab_id = crate::workspace::public_tab_id_for_number(
-                    &target.workspace_id,
-                    target.tab_number,
-                );
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    client
-                        .shell_location
-                        .get_or_insert_with(Default::default)
-                        .focus_tab(target.workspace_id, tab_id);
-                }
-                true
-            }
-            Method::AttentionDismiss(params) => {
-                if !self
-                    .app
-                    .state
-                    .attention_source_matches(&params.source_pane_id)
-                {
-                    let response = ErrorResponse {
-                        id: msg.request.id,
-                        error: ErrorBody {
-                            code: "stale_target".to_owned(),
-                            message: "the attention item is no longer current".to_owned(),
-                        },
-                    };
-                    if let Ok(encoded) = serde_json::to_string(&response) {
-                        let _ = msg.respond_to.send(encoded);
-                    }
-                    return false;
-                }
-                self.app
-                    .state
-                    .dismiss_docked_attention_from(&self.app.terminal_runtimes)
-            }
-            _ => return false,
-        };
-        let response = if changed {
-            serde_json::to_string(&SuccessResponse {
-                id: msg.request.id,
-                result: ResponseResult::Ok {},
-            })
-        } else {
-            serde_json::to_string(&ErrorResponse {
-                id: msg.request.id,
-                error: ErrorBody {
-                    code: "attention_not_open".to_owned(),
-                    message: "no attention pane is open".to_owned(),
-                },
-            })
-        };
-        if let Ok(encoded) = response {
-            let _ = msg.respond_to.send(encoded);
-        }
-        let attention_changed = self.sync_attention_owner();
-        let focus_after = self.shell_focus_target(client_id);
-        let focused_tabs_after = self.focused_shell_tabs();
-        self.app.accept_current_focus_without_events();
-        self.send_shell_navigation_focus_events(
-            focus_before.as_ref(),
-            focus_after.as_ref(),
-            &focused_tabs_before,
-            &focused_tabs_after,
-        );
-        changed | attention_changed
     }
 
     pub(super) fn handle_client_shell_api_request(
@@ -1029,6 +883,9 @@ impl HeadlessServer {
             msg.request.method,
             crate::api::schema::Method::AttentionOpen(_)
                 | crate::api::schema::Method::AttentionDismiss(_)
+                | crate::api::schema::Method::AttentionView(_)
+                | crate::api::schema::Method::AttentionAcknowledge(_)
+                | crate::api::schema::Method::AttentionJump(_)
         ) {
             return self.handle_client_shell_attention_request(client_id, msg);
         }
@@ -1050,7 +907,7 @@ impl HeadlessServer {
         if reconcile || self.app.state.popup_pane.is_some() != popup_before {
             self.reconcile_client_shell_locations();
         }
-        let attention_changed = self.sync_attention_owner();
+        let attention_changed = self.reconcile_attention_views();
         if let Some(all_focus_before) = all_focus_before {
             self.finish_shell_location_reconciliation(all_focus_before, &focused_tabs_before);
         } else {

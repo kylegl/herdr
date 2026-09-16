@@ -20,8 +20,6 @@ pub(crate) fn pane_is_scrolled_back(rt: &TerminalRuntime) -> bool {
         .is_some_and(|metrics| metrics.offset_from_bottom > 0)
 }
 
-const ATTENTION_DISMISS_LABEL: &str = "[Dismiss]";
-
 fn pane_border_title(label: &str, pane_width: u16, _focused: bool) -> Option<String> {
     let label = label.trim();
     if label.is_empty() || pane_width <= 4 {
@@ -29,26 +27,6 @@ fn pane_border_title(label: &str, pane_width: u16, _focused: bool) -> Option<Str
     }
     let max_label_width = pane_width.saturating_sub(4) as usize;
     Some(format!(" {} ", truncate_end(label, max_label_width)))
-}
-
-fn attention_dismiss_button_rect_for_info(app: &AppState, info: &PaneInfo) -> Option<Rect> {
-    if app.docked_attention_pane() != Some(info.id) || !info.borders.contains(Borders::TOP) {
-        return None;
-    }
-    let width = ATTENTION_DISMISS_LABEL.len() as u16;
-    if info.rect.width < width.saturating_add(6) {
-        return None;
-    }
-    Some(Rect::new(
-        info.rect
-            .x
-            .saturating_add(info.rect.width)
-            .saturating_sub(width)
-            .saturating_sub(1),
-        info.rect.y,
-        width,
-        1,
-    ))
 }
 
 // Full view computation reaches this helper for active and background panes.
@@ -649,17 +627,13 @@ fn render_pane_border_titles(
     let buf = frame.buffer_mut();
     let area = buf.area;
     for info in pane_infos {
-        let dismiss_button = attention_dismiss_button_rect_for_info(app, info);
         if !info.borders.contains(Borders::TOP) || info.rect.width <= 4 {
             continue;
         }
-        let attention_title = app.attention_dock_title_for_pane(info.id);
-        let is_attention_title = attention_title.is_some();
-        let label = attention_title.or_else(|| {
-            ws.pane_state(info.id)
-                .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
-                .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
-        });
+        let label = ws
+            .pane_state(info.id)
+            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders));
         let Some(title) =
             label.and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
         else {
@@ -670,31 +644,23 @@ fn render_pane_border_titles(
             continue;
         }
         let start_x = info.rect.x.saturating_add(1);
-        let button_for_pane = dismiss_button.filter(|button| {
-            button.y == y
-                && button.x >= start_x
-                && button.x < info.rect.x.saturating_add(info.rect.width)
-        });
-        let end_x = button_for_pane
-            .map(|button| button.x.saturating_sub(1))
-            .unwrap_or_else(|| {
-                info.rect
-                    .x
-                    .saturating_add(info.rect.width)
-                    .saturating_sub(1)
-            })
+        let end_x = info
+            .rect
+            .x
+            .saturating_add(info.rect.width)
+            .saturating_sub(1)
             .min(area.x.saturating_add(area.width));
         if start_x >= end_x {
             continue;
         }
         let visually_focused = info.is_focused;
-        let color = if visually_focused || is_attention_title {
+        let color = if visually_focused {
             app.palette.accent
         } else {
             app.palette.overlay0
         };
         let mut style = Style::default().fg(color);
-        if visually_focused || is_attention_title {
+        if visually_focused {
             style = style.add_modifier(Modifier::BOLD);
         }
         buf.set_stringn(
@@ -704,17 +670,6 @@ fn render_pane_border_titles(
             end_x.saturating_sub(start_x) as usize,
             style,
         );
-        if let Some(button) = button_for_pane {
-            buf.set_stringn(
-                button.x,
-                button.y,
-                ATTENTION_DISMISS_LABEL,
-                button.width as usize,
-                Style::default()
-                    .fg(app.palette.accent)
-                    .add_modifier(Modifier::BOLD),
-            );
-        }
     }
 }
 

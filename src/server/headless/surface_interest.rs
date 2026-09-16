@@ -11,6 +11,9 @@ impl HeadlessServer {
         client_id: u64,
         active: bool,
     ) -> Option<(bool, u64)> {
+        if !active {
+            self.clear_attention_view(client_id);
+        }
         let focus_before = self.shell_focus_targets();
         let focused_tabs_before = self.focused_shell_tabs();
         let (changed, projection_revision) = {
@@ -61,7 +64,7 @@ impl HeadlessServer {
         }
         if changed {
             self.finish_shell_location_reconciliation(focus_before, &focused_tabs_before);
-            self.sync_attention_owner();
+            self.reconcile_attention_views();
         }
 
         if active {
