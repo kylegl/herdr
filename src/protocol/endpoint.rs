@@ -33,6 +33,8 @@ pub const ATTENTION_VIEW_METHOD: &str = "attention.view";
 pub const ATTENTION_ACKNOWLEDGE_METHOD: &str = "attention.acknowledge";
 pub const ATTENTION_JUMP_METHOD: &str = "attention.jump";
 pub const ATTENTION_SURFACE_KIND: &str = "attention.surface.v1";
+pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
+pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 
 fn default_true() -> bool {
     true
@@ -50,6 +52,12 @@ pub struct EndpointClientHello {
     pub mouse_capture: bool,
     #[serde(default = "default_true")]
     pub surface_active: bool,
+    /// Accept the optional cell-retaining surface encoding on this connection.
+    #[serde(default)]
+    pub surface_reuse: bool,
+    /// Accept the optional surface-delta encoding on this connection.
+    #[serde(default)]
+    pub surface_delta: bool,
     #[serde(default)]
     pub snapshot_codecs: Vec<String>,
     #[serde(default)]
@@ -103,6 +111,16 @@ pub struct EndpointHandshakeError {
     pub message: String,
 }
 
+/// Optional companion to a V1 snapshot. The view payload is intentionally opaque to this
+/// stable envelope so clients can ignore view language additions they do not understand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointAgentViewProjection {
+    pub boot_id: String,
+    pub revision: u64,
+    #[serde(default)]
+    pub view: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointServerWelcome {
     pub generation: u32,
@@ -136,6 +154,22 @@ pub fn snapshot_message_with_attention_queue(
     })
 }
 
+pub fn agent_view_projection_message(
+    boot_id: &str,
+    revision: u64,
+    view: Option<&crate::api::schema::AgentViewSetParams>,
+) -> serde_json::Result<ServerMessage> {
+    let projection = EndpointAgentViewProjection {
+        boot_id: boot_id.to_owned(),
+        revision,
+        view: view.map(serde_json::to_value).transpose()?,
+    };
+    Ok(ServerMessage::EndpointControl {
+        kind: AGENT_VIEW_PROJECTION_KIND.into(),
+        data: serde_json::to_string(&projection)?,
+    })
+}
+
 impl EndpointClientHello {
     pub fn supports_required_codecs(&self) -> bool {
         self.snapshot_codecs
@@ -164,9 +198,12 @@ impl EndpointServerWelcome {
             blob_codec: BLOB_CODEC_V1.into(),
             methods,
             capabilities: vec![
+                super::surface_reuse::CAPABILITY.into(),
+                super::surface_delta::CAPABILITY.into(),
                 SURFACE_INTEREST_CAPABILITY.into(),
                 PRESENTATION_EFFECTS_FENCE_CAPABILITY.into(),
                 HEALTH_CHECK_CAPABILITY.into(),
+                AGENT_VIEW_PROJECTION_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -205,6 +242,8 @@ mod tests {
             endpoint_keybindings: false,
             mouse_capture: true,
             surface_active: true,
+            surface_reuse: false,
+            surface_delta: false,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
@@ -297,6 +336,33 @@ mod tests {
     }
 
     #[test]
+    fn agent_view_projection_is_an_optional_revision_bound_control() {
+        let view = crate::api::schema::AgentViewSetParams {
+            source: "example.views".into(),
+            label: Some("focus".into()),
+            filter: None,
+            sort: Vec::new(),
+        };
+        let ServerMessage::EndpointControl { kind, data } =
+            agent_view_projection_message("boot", 7, Some(&view)).unwrap()
+        else {
+            panic!("projection should use endpoint control");
+        };
+        assert_eq!(kind, AGENT_VIEW_PROJECTION_KIND);
+        let projection: EndpointAgentViewProjection = serde_json::from_str(&data).unwrap();
+        assert_eq!(projection.boot_id, "boot");
+        assert_eq!(projection.revision, 7);
+        assert_eq!(
+            projection
+                .view
+                .map(serde_json::from_value)
+                .transpose()
+                .unwrap(),
+            Some(view)
+        );
+    }
+
+    #[test]
     fn snapshot_json_tolerates_future_fields_and_command_actions() {
         let mut snapshot = match snapshot_message(&snapshot()).unwrap() {
             ServerMessage::EndpointControl { data, .. } => {
@@ -353,8 +419,12 @@ mod tests {
     fn legacy_hello_defaults_to_an_active_surface() {
         let mut value = serde_json::to_value(hello()).unwrap();
         value.as_object_mut().unwrap().remove("surface_active");
+        value.as_object_mut().unwrap().remove("surface_reuse");
+        value.as_object_mut().unwrap().remove("surface_delta");
         let decoded: EndpointClientHello = serde_json::from_value(value).unwrap();
         assert!(decoded.surface_active);
+        assert!(!decoded.surface_reuse);
+        assert!(!decoded.surface_delta);
     }
 
     #[test]
@@ -363,9 +433,12 @@ mod tests {
         assert_eq!(
             welcome.capabilities,
             vec![
+                super::super::surface_reuse::CAPABILITY.to_string(),
+                super::super::surface_delta::CAPABILITY.to_string(),
                 SURFACE_INTEREST_CAPABILITY.to_string(),
                 PRESENTATION_EFFECTS_FENCE_CAPABILITY.to_string(),
                 HEALTH_CHECK_CAPABILITY.to_string(),
+                AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
             ]
         );
     }

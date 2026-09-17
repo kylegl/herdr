@@ -130,17 +130,36 @@ pub(super) fn render_mode_bar(
                         crate::api::schema::PaneCopySearchDirection::Forward => "/",
                         crate::api::schema::PaneCopySearchDirection::Backward => "?",
                     };
-                    segments.extend([
-                        (" COPY ".to_owned(), mode_style),
-                        (" ".to_owned(), base),
-                        (marker.to_owned(), key),
-                        (
-                            prompt.query.clone(),
-                            Style::default().fg(palette.text).bg(palette.panel_bg),
-                        ),
-                        ("█".to_owned(), key),
-                        ("  enter search  esc cancel".to_owned(), base),
-                    ]);
+                    buffer.set_stringn(bar.x, bar.y, " COPY ", usize::from(bar.width), mode_style);
+                    let prefix = 8.min(bar.width);
+                    if bar.width >= 8 {
+                        buffer.set_string(bar.x + 7, bar.y, marker, key);
+                    }
+                    let footer = "  enter search  esc cancel";
+                    let footer_width = if bar.width >= 50 {
+                        footer.len() as u16
+                    } else {
+                        0
+                    };
+                    let field = Rect::new(
+                        bar.x + prefix,
+                        bar.y,
+                        bar.width.saturating_sub(prefix + footer_width),
+                        1,
+                    );
+                    if let Some(cursor) = text_editor::render(
+                        buffer,
+                        field,
+                        &prompt.query,
+                        Style::default().fg(palette.text).bg(palette.panel_bg),
+                    ) {
+                        buffer[(cursor.x, cursor.y)]
+                            .set_style(Style::default().fg(palette.panel_bg).bg(palette.text));
+                    }
+                    if footer_width > 0 {
+                        buffer.set_string(bar.right() - footer_width, bar.y, footer, base);
+                    }
+                    return Some(bar);
                 } else {
                     let select = if copy_mode.selection.is_some() {
                         "selecting"
@@ -217,6 +236,7 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) active_endpoint_id: &'a ClientEndpointId,
     pub(super) collapsed_endpoints: &'a HashSet<ClientEndpointId>,
     pub(super) collapsed_groups: &'a HashSet<String>,
+    pub(super) remote_collapsed_groups: &'a HashMap<ClientEndpointId, HashSet<String>>,
     pub(super) workspace_scroll: &'a mut usize,
     pub(super) agent_scroll: &'a mut usize,
     pub(super) tab_scroll: &'a mut usize,
@@ -226,8 +246,9 @@ pub(super) struct ShellRenderState<'a> {
     pub(super) sidebar_section_split: f32,
     pub(super) tab_drag_insert_index: Option<usize>,
     pub(super) selected_endpoint_id: Option<&'a ClientEndpointId>,
-    pub(super) selected_workspace_id: Option<&'a str>,
     pub(super) selected_agent_pane_id: Option<&'a str>,
+    pub(super) selected_workspace_id: Option<&'a WorkspaceNavigationTarget>,
+    pub(super) reveal_navigation_workspace: &'a mut bool,
     pub(super) dragged_workspace_id: Option<&'a str>,
     pub(super) workspace_drop_indicator_row: Option<u16>,
 }
@@ -285,15 +306,9 @@ pub(super) fn render_shell(
                 snapshot,
                 config,
                 state
-                    .selected_endpoint_id
-                    .is_none_or(|endpoint| endpoint == state.active_endpoint_id)
-                    .then_some(state.selected_workspace_id)
-                    .flatten(),
-                state
-                    .selected_endpoint_id
-                    .is_none_or(|endpoint| endpoint == state.active_endpoint_id)
-                    .then_some(state.selected_agent_pane_id)
-                    .flatten(),
+                    .selected_workspace_id
+                    .map(|target| target.workspace_id.as_str()),
+                state.selected_agent_pane_id,
                 &mut hits,
             );
         } else {

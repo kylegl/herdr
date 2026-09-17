@@ -53,7 +53,6 @@ impl HeadlessServer {
                 }
             }
         }
-        self.reject_over_limit_handoff(pane_by_terminal.len(), &socket_path)?;
 
         self.handoff_in_progress = true;
         self.disconnect_all_clients_for_handoff();
@@ -277,25 +276,6 @@ impl HeadlessServer {
         self.client_socket_path = client_path;
         self.client_socket_identity = client_socket_identity;
         Ok(())
-    }
-
-    #[cfg(unix)]
-    pub(super) fn reject_over_limit_handoff(
-        &mut self,
-        pane_count: usize,
-        socket_path: &Path,
-    ) -> io::Result<()> {
-        if pane_count <= crate::server::handoff::MAX_FDS_PER_HANDOFF {
-            return Ok(());
-        }
-        let _ = std::fs::remove_file(socket_path);
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "live handoff supports at most {} panes in one update; close panes or restart herdr normally",
-                crate::server::handoff::MAX_FDS_PER_HANDOFF
-            ),
-        ))
     }
 
     #[cfg(unix)]

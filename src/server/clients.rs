@@ -193,6 +193,8 @@ pub(crate) struct ClientConnection {
     /// Alternate the two presentation producers sharing the bounded render channel.
     pub(crate) attention_render_priority: bool,
     pub(crate) attention_render_pending: bool,
+    /// View policy paired with the last coherent shell replacement.
+    pub(crate) shell_agent_view: Option<crate::api::schema::AgentViewSetParams>,
     /// Monotonic shell replacement revision for this connection.
     pub(crate) shell_projection_revision: u64,
     /// Whether this shell is waiting for one ordered endpoint command response.
@@ -265,6 +267,7 @@ impl ClientConnection {
             attention_surface: None,
             attention_render_priority: false,
             attention_render_pending: false,
+            shell_agent_view: None,
             shell_projection_revision: 0,
             shell_endpoint_command_in_flight: false,
             shell_endpoint_command_surface_revision: None,
@@ -277,6 +280,10 @@ impl ClientConnection {
 
     pub(crate) fn request_repaint(&mut self) {
         self.render_state.request_repaint();
+    }
+
+    pub(crate) fn request_recompute(&mut self) {
+        self.render_state.request_recompute();
     }
 
     pub(crate) fn track_shell_input(

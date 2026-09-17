@@ -224,14 +224,13 @@ async fn attention_geometry_has_one_hidden_owner_and_visible_source_wins() {
 
 #[cfg(unix)]
 #[test]
-fn attention_handoff_rejection_preserves_queue_and_canonical_topology() {
+fn attention_handoff_capture_preserves_queue_and_canonical_topology() {
     let (mut server, pane, source) = attention_fixture();
     let snapshot = serde_json::to_value(server.app.session_snapshot()).unwrap();
     let queue = client_shell_attention_queue(&server.app);
-    let path = std::env::temp_dir().join(format!("attention-reject-{}", pane.raw()));
-    assert!(server
-        .reject_over_limit_handoff(crate::server::handoff::MAX_FDS_PER_HANDOFF + 1, &path)
-        .is_err());
+    let handoff = server.app.attention_handoff_state();
+    assert_eq!(handoff.queue.len(), 1);
+    assert_eq!(handoff.queue[0].source_pane_id, source);
     assert_eq!(client_shell_attention_queue(&server.app), queue);
     assert_eq!(
         serde_json::to_value(server.app.session_snapshot()).unwrap(),
