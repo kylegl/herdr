@@ -8,6 +8,8 @@ Read this before merging upstream changes to agent lifecycle, pane identity, cli
 - New entries wait 300 ms. Working cancels an entry and rearms a dismissed pane. Agent exit removes its entry. Controller-managed Pi agents remain excluded.
 - Queue arrival never creates a split, moves a pane, changes focus, changes zoom, or consumes a public pane number.
 - Each client explicitly selects its own interactive attention view. New arrivals cannot redirect that selection. Closing or viewing does not acknowledge an entry.
+- When the selected entry leaves the queue, an open view advances to the remaining queue head and closes only when the queue empties. Dismiss waits for the server's updated queue. Held input and cached frames must not follow selection changes.
+- `prefix+o` toggles the view, `prefix+shift+o` dismisses the selected item, and a left click outside closes without clicking through. Escape belongs to the terminal. The Close button hides the view, and Jump leaves it for the canonical source. Disconnects and non-stale view failures also clear unusable views.
 - The selected terminal may be resized for the view. Its canonical workspace, tab, pane identity, and PTY ownership do not change. A PTY still has one geometry shared across clients.
 - Acknowledge targets one current public pane ID. Jump navigates to the canonical source without acknowledging it. Legacy projection actions reject stale targets rather than substituting the queue head.
 - Snapshots and history capture ordinary canonical topology directly. No attention exchange or snapshot canonicalization is needed.

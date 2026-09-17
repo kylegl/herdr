@@ -19,6 +19,9 @@ impl ClientShellState {
                 self.persist_chrome_preferences(outcome);
             }
             crate::input::KeybindMatch::Action(action) => {
+                if self.attention_binding(action, outcome) {
+                    return;
+                }
                 if matches!(
                     action,
                     crate::input::KeybindAction::NewWorktree
@@ -608,7 +611,11 @@ impl ClientShellState {
                 source_pane_id,
                 view_id,
             } => {
-                if result.is_err()
+                // A working transition can invalidate a view before its queue snapshot
+                // arrives. Let that snapshot advance selection rather than closing it.
+                if result
+                    .as_ref()
+                    .is_err_and(|error| error.code.as_deref() != Some("stale_attention"))
                     && self.attention_view_id() == view_id
                     && self.attention_selected() == source_pane_id.as_deref()
                 {

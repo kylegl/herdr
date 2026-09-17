@@ -96,19 +96,19 @@ A blocked agent makes its pane, tab, and workspace look blocked. A working agent
 
 This is the main Herdr workflow: start several agents, let them work in parallel, and use the sidebar to see which project needs a decision, which one is still running, and which one is ready to review.
 
-## Attention dock
+## Attention queue
 
-Herdr automatically presents agents that need attention in the active tab. It keeps one global queue: blocked agents come first, followed by agents that finished in the background, with first-in-first-out ordering inside each group. A state must remain blocked or done for 300 milliseconds before it enters the visible queue, so brief transitions back to working do not flash a temporary pane.
+The sidebar's Attention row shows red and green counts for agents waiting for input and agents that finished in the background. New arrivals update the counts without opening anything. Click the row or press `prefix+o` to toggle an interactive terminal overlay. Blocked agents come first, followed by finished agents, with first-in-first-out ordering inside each group. Entries wait 300 milliseconds before becoming available.
 
 Pi agents launched through `agent.start`, including Shepherdr workers and manually CLI-launched Pi agents, are excluded from the dock while Herdr retains their managed-agent ownership. Their lifecycle state, automation, and sidebar status remain available. Pi sessions started directly in a shell and managed agents of other kinds still use the dock normally. Assigning work to an existing unmanaged Pi session does not exclude it.
 
-The queue head moves into a temporary tiled split without changing the focused pane. One pane splits to the right; two side-by-side panes split below the right pane; larger layouts extend the southeast pane to the right. Switching workspace or tab restores the agent and removes the previous temporary split before creating one in the new context. Herdr does not create a duplicate when the agent is already visible in the active tab. The temporary border reads `WORKSPACE - <name>` using the agent's home workspace name.
+Use Prev and Next to browse the queue. New arrivals do not replace the selected agent. When that agent resumes working or exits, the overlay advances to the next remaining item instead of disappearing. It closes when the queue is empty. Dismiss or `prefix+shift+o` acknowledges only the selected occurrence and continues through the queue once the server confirms removal. The same agent can reappear after it resumes and later needs attention again.
 
-Focusing or viewing the temporary pane does not remove it from the queue. A focused entry stays pinned so Herdr never redirects your input. It leaves after it returns to `working` or the agent exits; then Herdr restores it home and presents the next entry. Click `[Dismiss]` in the temporary pane border or press `prefix+shift+o` to acknowledge only the current attention occurrence, restore that pane home, and present the next queued item. The same session can reappear after it resumes and later needs attention again. On the focused attention pane, `prefix+o` restores it to its original workspace, tab, and layout position, switches there, and focuses it.
+To hide the overlay without acknowledging an entry, press `prefix+o`, click outside it, or use Close. Escape goes to the agent rather than closing the overlay. Jump closes the overlay and takes you to the agent's original pane without acknowledging it.
 
-The real pane and PTY move into the temporary split so wrapping, cursor, mouse, and input remain native. This is server topology, so every attached client can observe the temporary placement. Workspace names and state remain attributed to the pane's home workspace.
+The overlay leaves the underlying pane layout and dimensions unchanged. Each client chooses its own attention view. The selected terminal can resize to fit, but its workspace, tab, pane identity, and PTY ownership stay unchanged.
 
-Attention placement and the queue belong to the live server session and are cleared by a full server restart. A live handoff restores canonical topology, transfers the PTY, and reconstructs blocked and unseen-done queue entries. Session snapshots always save the original layout without temporary splits.
+The queue belongs to the live server session. Live handoff preserves queue order and dismissals. Session snapshots contain the ordinary pane layout without temporary splits.
 
 ## Direct integrations
 

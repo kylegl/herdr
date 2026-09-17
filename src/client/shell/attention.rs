@@ -91,8 +91,17 @@ impl ClientShellState {
                     .any(|entry| &entry.pane_id == id)
             })
         {
-            // Invalidation hides rather than redirecting keys to a newly arrived pane.
+            // Completing one item continues the open queue. Drop its input leases and
+            // frame before selecting the next item, so held keys cannot follow it.
+            let mode = self.mode;
             self.hide_attention();
+            self.attention_widget.selected = self
+                .attention_queue()
+                .first()
+                .map(|entry| entry.pane_id.clone());
+            if self.attention_open() {
+                self.mode = mode;
+            }
         }
     }
 
@@ -139,6 +148,9 @@ impl ClientShellState {
         self.attention_widget.terminal = None;
         self.attention_widget.buttons.clear();
         self.attention_widget.mouse_down = None;
+        if self.mode == ClientShellMode::Prefix {
+            self.mode = ClientShellMode::Terminal;
+        }
     }
 
     pub(super) fn clear_attention_endpoint(&mut self, endpoint: &ClientEndpointId) {
@@ -239,11 +251,87 @@ impl ClientShellState {
                     crate::api::schema::Method::AttentionJump(target)
                 };
                 self.push_endpoint_method(method, outcome);
-                self.hide_attention();
+                if matches!(action, AttentionAction::Jump) {
+                    self.hide_attention();
+                }
             }
         }
         self.sync_attention_lease(outcome);
         outcome.repaint = true;
+    }
+
+    pub(super) fn attention_binding(
+        &mut self,
+        action: crate::input::KeybindAction,
+        outcome: &mut ClientShellInput,
+    ) -> bool {
+        if !self.attention_supported() {
+            return false;
+        }
+        match action {
+            crate::input::KeybindAction::OpenNotificationTarget => self.toggle_attention(outcome),
+            crate::input::KeybindAction::DismissAttention => {
+                self.attention_action(AttentionAction::Dismiss, outcome);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn toggle_attention(&mut self, outcome: &mut ClientShellInput) {
+        if self.attention_open() {
+            self.hide_attention();
+        } else if self.overlay.is_none() && self.popup_terminal_id.is_none() && !self.popup_pending
+        {
+            self.release_input_leases(outcome);
+            self.copy_mode = None;
+            self.reset_copy_pipeline();
+            self.selection = None;
+            self.mode = ClientShellMode::Terminal;
+            self.attention_widget.selected = self
+                .attention_queue()
+                .first()
+                .map(|entry| entry.pane_id.clone());
+        }
+        self.sync_attention_lease(outcome);
+        outcome.repaint = true;
+    }
+
+    pub(super) fn route_attention_key(
+        &mut self,
+        key: &crate::input::TerminalKey,
+        outcome: &mut ClientShellInput,
+    ) -> Option<ClientInputTarget> {
+        let prefix = crate::config::terminal_key_matches_combo(key, self.config.keybinds.prefix);
+        if self.mode == ClientShellMode::Prefix {
+            self.mode = ClientShellMode::Terminal;
+            outcome.repaint = true;
+            if prefix {
+                return self
+                    .attention_selected()
+                    .map(|id| ClientInputTarget::Pane(id.to_owned()));
+            }
+            if let Some(crate::input::KeybindMatch::Action(action)) =
+                crate::input::resolve_prefix_binding(&self.config.keybinds.keybinds, key)
+            {
+                self.attention_binding(action, outcome);
+            }
+            return None;
+        }
+        if let Some(crate::input::KeybindMatch::Action(action)) =
+            crate::input::resolve_direct_binding(&self.config.keybinds.keybinds, key)
+        {
+            if self.attention_binding(action, outcome) {
+                return None;
+            }
+        }
+        if prefix {
+            self.mode = ClientShellMode::Prefix;
+            outcome.repaint = true;
+            return None;
+        }
+        self.attention_selected()
+            .map(|id| ClientInputTarget::Pane(id.to_owned()))
     }
 
     /// This gate precedes ordinary key leases, popup routing, and host pane mouse focus.
@@ -263,24 +351,7 @@ impl ClientShellState {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && contains(self.attention_widget.row, (mouse.column, mouse.row))
             {
-                if self.attention_open() {
-                    self.hide_attention();
-                } else if self.overlay.is_none()
-                    && self.popup_terminal_id.is_none()
-                    && !self.popup_pending
-                {
-                    self.release_input_leases(outcome);
-                    self.copy_mode = None;
-                    self.reset_copy_pipeline();
-                    self.selection = None;
-                    self.mode = ClientShellMode::Terminal;
-                    self.attention_widget.selected = self
-                        .attention_queue()
-                        .first()
-                        .map(|entry| entry.pane_id.clone());
-                }
-                self.sync_attention_lease(outcome);
-                outcome.repaint = true;
+                self.toggle_attention(outcome);
                 return true;
             }
         }
@@ -305,19 +376,6 @@ impl ClientShellState {
                 // The ordinary focus path must still release keys and notify the server.
                 return false;
             }
-            RawInputEvent::Key(key) if key.code == KeyCode::Esc => {
-                if key.kind == KeyEventKind::Press {
-                    self.attention_action(AttentionAction::Close, outcome);
-                    self.input_leases.complete_press(
-                        crate::input::InputLeaseKey::new(0, key),
-                        key,
-                        None,
-                        None,
-                        None,
-                    );
-                }
-                return true;
-            }
             RawInputEvent::Key(key) => {
                 self.handle_key(key.clone(), outcome);
                 return true;
@@ -328,6 +386,12 @@ impl ClientShellState {
             RawInputEvent::Paste(text) => Some(ClientPaneInputEvent::Paste(text.clone())),
             RawInputEvent::Mouse(mouse) => {
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if self.attention_geometry().is_some_and(|geometry| {
+                        !contains(geometry.outer, (mouse.column, mouse.row))
+                    }) {
+                        self.attention_action(AttentionAction::Close, outcome);
+                        return true;
+                    }
                     if let Some(action) = self
                         .attention_widget
                         .buttons

@@ -119,7 +119,7 @@ fn arrivals_never_open_or_replace_selected_identity_and_geometry_stays_fixed() {
 }
 
 #[test]
-fn escape_hides_without_acknowledging_and_held_repeats_cannot_reach_host() {
+fn toggle_hides_without_acknowledging_and_held_repeats_cannot_reach_host() {
     let mut state = state();
     open(&mut state);
     let key = crate::input::TerminalKey::new(KeyCode::Char('x'), KeyModifiers::NONE);
@@ -127,10 +127,7 @@ fn escape_hides_without_acknowledging_and_held_repeats_cannot_reach_host() {
     assert!(
         matches!(typed.requests.as_slice(), [ClientMessage::ClientShellPaneInput { pane_id, .. }] if pane_id == "source-a")
     );
-    let closed = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
-        KeyCode::Esc,
-        KeyModifiers::NONE,
-    ))]);
+    let closed = toggle(&mut state);
     assert!(!state.attention_open());
     assert!(
         matches!(methods(&closed).as_slice(), [crate::api::schema::Method::AttentionView(params)] if params.source_pane_id.is_none())
@@ -166,13 +163,6 @@ fn mouse_and_paste_target_source_while_native_frame_crop_tracks_cursor() {
     assert!(
         matches!(click.requests.as_slice(), [ClientMessage::ClientShellPaneInput { pane_id, events }] if pane_id == "source-a" && matches!(events.as_slice(), [ClientPaneInputEvent::Mouse { position: ClientMousePosition::Cell {column: 175, row: 75}, geometry: None, .. }]))
     );
-    let outside = state.handle_raw_events(vec![mouse(
-        MouseEventKind::Down(MouseButton::Left),
-        119,
-        39,
-    )]);
-    assert!(outside.requests.is_empty());
-    assert!(outside.actions.is_empty());
     let paste = state.handle_raw_events(vec![RawInputEvent::Paste("approval".into())]);
     assert!(
         matches!(paste.requests.as_slice(), [ClientMessage::ClientShellPaneInput { pane_id, events }] if pane_id == "source-a" && matches!(events.as_slice(), [ClientPaneInputEvent::Paste(text)] if text == "approval"))
@@ -197,24 +187,36 @@ fn dismiss_and_jump_are_explicit_targeted_actions() {
             ),
             _ => unreachable!(),
         }
+        if matches!(action, AttentionAction::Dismiss) {
+            // Keep the selected view until the server confirms removal in its queue.
+            assert!(state.attention_open());
+            state.set_attention_queue(&ClientEndpointId::Local, vec![]);
+        }
         assert!(!state.attention_open());
     }
 }
 
 #[test]
-fn invalidation_and_disconnect_clear_view_without_selecting_another_entry() {
+fn removal_advances_until_queue_empty_and_disconnect_clears_view() {
     let mut state = state();
     open(&mut state);
     state.set_attention_queue(
         &ClientEndpointId::Local,
         vec![entry("source-b", EndpointAttentionKind::Blocked)],
     );
-    assert!(!state.attention_open());
+    assert_eq!(state.attention_selected(), Some("source-b"));
     let mut outcome = ClientShellInput::default();
     state.sync_attention_lease(&mut outcome);
     assert!(
-        matches!(methods(&outcome).as_slice(), [crate::api::schema::Method::AttentionView(params)] if params.source_pane_id.is_none())
+        matches!(methods(&outcome).as_slice(), [crate::api::schema::Method::AttentionView(params)] if params.source_pane_id.as_deref() == Some("source-b"))
     );
+    state.set_attention_queue(&ClientEndpointId::Local, vec![]);
+    assert!(!state.attention_open());
+    state.set_attention_queue(
+        &ClientEndpointId::Local,
+        vec![entry("source-b", EndpointAttentionKind::Blocked)],
+    );
+    assert!(!state.attention_open());
     open(&mut state);
     state.mark_endpoint_disconnected(&ClientEndpointId::Local);
     assert!(!state.attention_open());
@@ -310,4 +312,213 @@ fn focus_loss_releases_attention_mouse_at_last_translated_source_position() {
         repeated.requests.as_slice(),
         [ClientMessage::ClientShellFocus { focused: false }]
     ));
+}
+
+fn toggle(state: &mut ClientShellState) -> ClientShellInput {
+    let (code, modifiers) = state.config.keybinds.prefix;
+    state.handle_raw_events(vec![
+        RawInputEvent::Key(crate::input::TerminalKey::new(code, modifiers)),
+        RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Char('o'),
+            KeyModifiers::NONE,
+        )),
+    ])
+}
+
+#[test]
+fn sending_a_message_advances_without_leaking_held_input_or_stale_frames() {
+    let mut state = state();
+    state.set_attention_queue(
+        &ClientEndpointId::Local,
+        vec![
+            entry("source-a", EndpointAttentionKind::Blocked),
+            entry("source-b", EndpointAttentionKind::Done),
+        ],
+    );
+    open(&mut state);
+    let stale = surface(&state, "source-a");
+    let enter = crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::NONE);
+    let sent = state.handle_raw_events(vec![
+        RawInputEvent::Paste("Please continue".into()),
+        RawInputEvent::Key(enter.clone()),
+    ]);
+    assert!(sent.requests.iter().all(|request| matches!(request,
+        ClientMessage::ClientShellPaneInput { pane_id, .. } if pane_id == "source-a")));
+    assert!(state.attention_open());
+    // The server removes a working agent. Other attention remains actionable.
+    state.set_attention_queue(
+        &ClientEndpointId::Local,
+        vec![entry("source-b", EndpointAttentionKind::Done)],
+    );
+    assert_eq!(state.attention_selected(), Some("source-b"));
+    assert!(state.attention_widget.surface.is_none());
+    let mut update = ClientShellInput::default();
+    state.sync_attention_lease(&mut update);
+    assert!(matches!(methods(&update).as_slice(),
+        [crate::api::schema::Method::AttentionView(params)]
+        if params.source_pane_id.as_deref() == Some("source-b")));
+    assert!(!state.set_attention_surface(&ClientEndpointId::Local, stale));
+    let repeat = state.handle_raw_events(vec![RawInputEvent::Key(
+        enter.with_kind(KeyEventKind::Repeat),
+    )]);
+    assert!(repeat.requests.is_empty());
+    let escape = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    ))]);
+    assert!(state.attention_open());
+    assert!(matches!(escape.requests.as_slice(),
+        [ClientMessage::ClientShellPaneInput { pane_id, .. }] if pane_id == "source-b"));
+}
+
+#[test]
+fn keyboard_toggle_and_outside_click_close_without_acknowledging_or_click_through() {
+    let mut state = state();
+    toggle(&mut state);
+    assert!(state.attention_open());
+    let geometry = state.attention_geometry().unwrap();
+    let border = state.handle_raw_events(vec![mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        geometry.outer.x,
+        geometry.outer.y,
+    )]);
+    assert!(state.attention_open());
+    assert!(border.requests.is_empty());
+    let outside = state.handle_raw_events(vec![mouse(
+        MouseEventKind::Down(MouseButton::Left),
+        119,
+        39,
+    )]);
+    assert!(!state.attention_open());
+    assert!(outside.requests.is_empty());
+    assert!(matches!(methods(&outside).as_slice(),
+        [crate::api::schema::Method::AttentionView(params)] if params.source_pane_id.is_none()));
+    assert_eq!(state.attention_queue().len(), 1);
+    toggle(&mut state);
+    assert!(state.attention_open());
+    toggle(&mut state);
+    assert!(!state.attention_open());
+}
+
+#[test]
+fn dismiss_continues_after_confirmed_removal_but_failure_keeps_selection() {
+    let mut state = state();
+    state.set_attention_queue(
+        &ClientEndpointId::Local,
+        vec![
+            entry("source-a", EndpointAttentionKind::Blocked),
+            entry("source-b", EndpointAttentionKind::Done),
+        ],
+    );
+    open(&mut state);
+    let mut outcome = ClientShellInput::default();
+    state.attention_action(AttentionAction::Dismiss, &mut outcome);
+    let request = outcome
+        .actions
+        .iter()
+        .find_map(|action| match action {
+            ClientShellAction::Endpoint { request, .. } => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    state.handle_endpoint_result(
+        "boot-1",
+        &request.id,
+        Err(ClientShellEndpointError {
+            code: Some("endpoint_timeout".into()),
+            message: "timed out".into(),
+        }),
+    );
+    assert_eq!(state.attention_selected(), Some("source-a"));
+    state.set_attention_queue(
+        &ClientEndpointId::Local,
+        vec![entry("source-b", EndpointAttentionKind::Done)],
+    );
+    assert_eq!(state.attention_selected(), Some("source-b"));
+}
+
+#[test]
+fn stale_view_response_cannot_close_the_queue_before_or_after_its_snapshot() {
+    for snapshot_first in [false, true] {
+        let mut state = state();
+        let opened = open(&mut state);
+        let request_id = opened
+            .actions
+            .iter()
+            .find_map(|action| match action {
+                ClientShellAction::Endpoint { request, .. } => Some(request.id.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let advance = |state: &mut ClientShellState| {
+            state.set_attention_queue(
+                &ClientEndpointId::Local,
+                vec![entry("source-b", EndpointAttentionKind::Done)],
+            );
+            state.sync_attention_lease(&mut ClientShellInput::default());
+        };
+        if snapshot_first {
+            advance(&mut state);
+        }
+        state.handle_endpoint_result(
+            "boot-1",
+            &request_id,
+            Err(ClientShellEndpointError {
+                code: Some("stale_attention".into()),
+                message: "target left queue".into(),
+            }),
+        );
+        assert!(state.attention_open());
+        if !snapshot_first {
+            advance(&mut state);
+        }
+        assert_eq!(state.attention_selected(), Some("source-b"));
+    }
+}
+
+#[test]
+fn configured_direct_toggle_and_prefix_dismiss_route_only_attention_actions() {
+    let mut state = state();
+    let mut config = Config::default();
+    config.keys.open_notification_target = crate::config::BindingConfig::one("ctrl+o");
+    state.config = ClientShellConfig::from_config(&config);
+    let toggle = crate::input::TerminalKey::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    state.handle_raw_events(vec![RawInputEvent::Key(toggle.clone())]);
+    assert!(state.attention_open());
+    let (code, modifiers) = state.config.keybinds.prefix;
+    let dismissed = state.handle_raw_events(vec![
+        RawInputEvent::Key(crate::input::TerminalKey::new(code, modifiers)),
+        RawInputEvent::Key(crate::input::TerminalKey::new(
+            KeyCode::Char('O'),
+            KeyModifiers::SHIFT,
+        )),
+    ]);
+    assert!(matches!(methods(&dismissed).as_slice(),
+        [crate::api::schema::Method::AttentionAcknowledge(target)] if target.source_pane_id == "source-a"));
+    assert!(state.attention_open());
+    state.handle_raw_events(vec![RawInputEvent::Key(toggle)]);
+    assert!(!state.attention_open());
+}
+
+#[test]
+fn queue_advance_preserves_pending_toggle_prefix_instead_of_typing_into_next_agent() {
+    let mut state = state();
+    open(&mut state);
+    let (code, modifiers) = state.config.keybinds.prefix;
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        code, modifiers,
+    ))]);
+    state.set_attention_queue(
+        &ClientEndpointId::Local,
+        vec![entry("source-b", EndpointAttentionKind::Done)],
+    );
+    state.sync_attention_lease(&mut ClientShellInput::default());
+    let closed = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('o'),
+        KeyModifiers::NONE,
+    ))]);
+    assert!(!state.attention_open());
+    assert!(closed.requests.is_empty());
+    assert!(matches!(methods(&closed).as_slice(),
+        [crate::api::schema::Method::AttentionView(params)] if params.source_pane_id.is_none()));
 }

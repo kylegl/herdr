@@ -486,8 +486,8 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> Option<ClientInputTarget> {
-        if let Some(pane_id) = self.attention_selected() {
-            return Some(ClientInputTarget::Pane(pane_id.to_owned()));
+        if self.attention_open() {
+            return self.route_attention_key(key, outcome);
         }
         if self.handle_modal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
         {
